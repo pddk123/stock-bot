@@ -1,0 +1,22 @@
+name: Daily Stock Analysis
+
+on:
+  schedule:
+    # 매일 한국 시간 오전 9시 (UTC 시간으로는 00:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 수동으로 실행해볼 때 필요
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install finance-datareader pandas requests
+      - name: Run bot
+        run: python bot.py
