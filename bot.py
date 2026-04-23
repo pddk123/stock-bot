@@ -17,7 +17,6 @@ def send_telegram_message(message):
     except: pass
 
 def get_krx_sectors():
-    """KIND에서 업종 정보 확보"""
     try:
         url = 'http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13'
         df = pd.read_html(url, header=0)[0]
@@ -39,12 +38,10 @@ def load_portfolio():
     return list(set(codes))
 
 def get_market_sentiment():
-    """상승장 판단 근거 및 브리핑 생성"""
     indices = {'Nasdaq': '^IXIC', 'S&P500': '^GSPC', 'KOSPI': 'KS11', 'KOSDAQ': 'KQ11'}
     start_date = (datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d')
     scores, total_chg = 0, 0
     details = []
-    
     for name, ticker in indices.items():
         try:
             df = fdr.DataReader(ticker, start_date)
@@ -57,11 +54,9 @@ def get_market_sentiment():
     
     avg_chg = total_chg / len(indices)
     reason = f"글로벌 지수 평균 {avg_chg:+.2f}% 등락 및 주요 지수 {scores}/4 상승세 기반"
-    
     if scores >= 3 and avg_chg > 0.4: status = "🚀 **강력 상승장**"
     elif scores >= 2: status = "📈 **완만한 상승장**"
     else: status = "📉 **주의/하락 구간**"
-    
     return status, reason, "\n".join(details)
 
 def calculate_rsi(series, period=14):
@@ -75,19 +70,19 @@ def analyze_stock(symbol, name, sector, is_portfolio=False):
     try:
         df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d'))
         if len(df) < 30: return None
-        
         df['MA10'], df['MA20'] = df['Close'].rolling(10).mean(), df['Close'].rolling(20).mean()
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
         df['RSI'] = calculate_rsi(df['Close'])
-        
         curr = df.iloc[-1]
         vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'], df['RSI'].iloc[-1]
         
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
                'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'sell_desc': ""}
 
+        # S급: 추세 폭발 초입 (엄격한 AND 조건)
         if (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5):
             res.update({'grade': 'S'})
+        # A급: 안정적 추세안착 (강세 유지)
         elif (rsi_val > 50) and (curr['Close'] > curr['MA10']) and (vol_ratio >= 1.0):
             res.update({'grade': 'A'})
 
@@ -99,17 +94,19 @@ def main():
     mkt_status, mkt_reason, mkt_report = get_market_sentiment()
     my_codes = load_portfolio()
     
+    # 350개로 압축 스캔
     all_stocks = pd.merge(fdr.StockListing('KRX'), get_krx_sectors(), on='Code', how='left').fillna({'Sector': '기타'})
+    robust_market = all_stocks[all_stocks['Marcap'] >= 150_000_000_000].head(350)
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
     
     with ThreadPoolExecutor(max_workers=15) as executor:
-        # 1. 내 보유 종목
+        # 1. 포트폴리오 (무조건 분석)
         p_tasks = [executor.submit(analyze_stock, code, row['Name'], row['Sector'], True) 
                    for code in my_codes for _, row in all_stocks[all_stocks['Code']==code].iterrows()]
-        # 2. 시장 스캐닝
+        # 2. 시장 스캐닝 (상위 350개)
         m_tasks = [executor.submit(analyze_stock, row['Code'], row['Name'], row['Sector'], False) 
-                   for _, row in all_stocks[all_stocks['Marcap'] >= 150_000_000_000].head(500).iterrows()]
+                   for _, row in robust_market.iterrows()]
         
         for future in as_completed(p_tasks + m_tasks):
             r = future.result()
@@ -124,26 +121,18 @@ def main():
                 elif r['grade'] == 'A': a_list.append(r)
                 if r['sell_desc']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
-    # 메시지 조립 시작
     final_msg = f"🌿 **rootee님, 실시간 투자 리포트**\n\n"
+    final_msg += f"📊 **시장 진단**: {mkt_status}\n🧐 **판단 근거**: {mkt_reason}\n{mkt_report}\n\n"
     
-    # [1] 시장 진단 및 주도 섹터
-    final_msg += f"📊 **시장 진단**: {mkt_status}\n"
-    final_msg += f"🧐 **판단 근거**: {mkt_reason}\n"
-    final_msg += f"{mkt_report}\n\n"
-    
+    # 주도 섹터 분석
     combined = pd.DataFrame(s_list + a_list)
-    if not combined.empty:
-        # '기타'를 제외한 실제 업종 중 가장 많이 포착된 섹터 추출
-        real_sectors = combined[combined['sector'] != '기타']['sector'].value_counts()
-        if not real_sectors.empty:
-            final_msg += f"🔥 **현재 주도 섹터**: {', '.join(real_sectors.head(2).index.tolist())}\n"
-            final_msg += f"💡 해당 섹터 내 종목들이 S/A급에 다수 포착되었습니다.\n\n"
+    if not combined.empty and not combined[combined['sector'] != '기타'].empty:
+        top_s = combined[combined['sector'] != '기타']['sector'].value_counts().head(2).index.tolist()
+        final_msg += f"🔥 **현재 주도 섹터**: {', '.join(top_s)}\n\n"
 
-    # [2] 내 보유 종목
     final_msg += "📁 **내 보유 종목**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
     
-    # [3] S급 리스트
+    # S급 (섹터 미표기, 대장주 마킹)
     final_msg += "💎 **S급: 추세 폭발 초입**\n"
     if s_list:
         df_s = pd.DataFrame(s_list)
@@ -153,14 +142,13 @@ def main():
             final_msg += f"- {row['name']}: (RSI:{row['rsi']:.1f}, 거래량:{row['vol_ratio']:.1f}배{leader_tag})\n"
     else: final_msg += "- 조건 충족 없음\n"
     
-    # [4] A급 리스트
+    # A급 (간결하게 10개만)
     final_msg += "\n✨ **A급: 안정적 추세안착**\n"
     if a_list:
-        for row in a_list[:15]:
+        for row in a_list[:10]:
             final_msg += f"- {row['name']}: (RSI:{row['rsi']:.1f}, 거래량:{row['vol_ratio']:.1f}배)\n"
     else: final_msg += "- 조건 충족 없음\n"
     
-    # [5] 익절/매도 검토 (맨 밑으로 이동)
     final_msg += "\n🔔 **익절/매도 검토 (리스크 관리)**\n" + ("\n".join(sell_list[:7]) if sell_list else "- 과열 종목 없음")
     
     send_telegram_message(final_msg)
