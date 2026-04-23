@@ -16,8 +16,17 @@ def send_telegram_message(message):
     try: requests.post(url, json=payload)
     except: pass
 
+def get_krx_sectors():
+    """KRX KIND에서 업종 정보를 직접 가져와서 Sector 에러 해결"""
+    try:
+        url = 'http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13'
+        df = pd.read_html(url, header=0)[0]
+        df['종목코드'] = df['종목코드'].apply(lambda x: f"{x:06d}")
+        return df[['종목코드', '업종']].rename(columns={'종목코드':'Code', '업종':'Sector'})
+    except:
+        return pd.DataFrame(columns=['Code', 'Sector'])
+
 def load_portfolio():
-    """portfolio.txt에서 종목 코드를 읽어옴"""
     codes = []
     try:
         if os.path.exists('portfolio.txt'):
@@ -33,12 +42,10 @@ def load_portfolio():
     return []
 
 def get_market_sentiment():
-    """시장 동향 및 상태 분석"""
     indices = {'Nasdaq': '^IXIC', 'S&P500': '^GSPC', 'KOSPI': 'KS11', 'KOSDAQ': 'KQ11'}
     start_date = (datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d')
     scores, total_chg = 0, 0
     report = ""
-    
     for name, ticker in indices.items():
         try:
             df = fdr.DataReader(ticker, start_date)
@@ -52,9 +59,7 @@ def get_market_sentiment():
     avg_chg = total_chg / len(indices)
     if scores >= 3 and avg_chg > 0.5: status = "🚀 **강력 상승장** (공격적 투자 가능)"
     elif scores >= 2: status = "📈 **완만한 상승장** (추세 추종 유리)"
-    elif scores == 1: status = "📉 **주의 구간** (보수적 접근 권장)"
-    else: status = "🆘 **하락장** (현금 비중 확대 필요)"
-    
+    else: status = "📉 **주의/하락 구간** (보수적 접근)"
     return status, report
 
 def calculate_rsi(series, period=14):
@@ -64,36 +69,25 @@ def calculate_rsi(series, period=14):
     ema_down = down.ewm(com=period - 1, adjust=False).mean()
     return 100 - (100 / (1 + (ema_up / ema_down)))
 
-def analyze_stock(symbol, name, sector, sentiment, is_portfolio=False):
-    """추세 대폭발 및 섹터 분석 로직"""
+def analyze_stock(symbol, name, sector, is_portfolio=False):
     try:
         df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d'))
         if len(df) < 30: return None
-        
         df['MA10'], df['MA20'] = df['Close'].rolling(10).mean(), df['Close'].rolling(20).mean()
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
         df['RSI'] = calculate_rsi(df['Close'])
-        
         curr, prev = df.iloc[-1], df.iloc[-2]
-        vol_ratio = curr['Volume'] / curr['Vol_MA5']
-        rsi_val = df['RSI'].iloc[-1]
+        vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'], df['RSI'].iloc[-1]
         
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
                'grade': None, 'desc': "", 'sell_desc': "", 'rsi': rsi_val, 'vol_ratio': vol_ratio}
 
-        # 1. [S급: 추세 폭발 초입] 
-        is_s_class = (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5)
-        if is_s_class:
-            res.update({'grade': 'S', 'desc': f"추세폭발 (RSI:{rsi_val:.1f}, 거래량:{vol_ratio:.1f}배)"})
-        
-        # 2. [A급: 안정적 추세안착]
+        if (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5):
+            res.update({'grade': 'S', 'desc': f"추세폭발 (RSI:{rsi_val:.1f}, {vol_ratio:.1f}배)"})
         elif (rsi_val > 50) and (curr['Close'] > curr['MA10']) and (vol_ratio >= 1.0):
-            res.update({'grade': 'A', 'desc': f"추세안착 (RSI:{rsi_val:.1f}, 거래량:{vol_ratio:.1f}배)"})
+            res.update({'grade': 'A', 'desc': f"추세안착 (RSI:{rsi_val:.1f}, {vol_ratio:.1f}배)"})
 
-        # [매도 로직: 과열권]
-        if rsi_val >= 80:
-            res['sell_desc'] = f"🔥 과열매도 (RSI:{rsi_val:.1f})"
-            
+        if rsi_val >= 80: res['sell_desc'] = f"🔥 과열매도 (RSI:{rsi_val:.1f})"
         return res if (res['grade'] or res['sell_desc'] or is_portfolio) else None
     except: return None
 
@@ -101,20 +95,23 @@ def main():
     mkt_status, mkt_report = get_market_sentiment()
     my_stock_codes = load_portfolio()
     
-    krx_listing = fdr.StockListing('KRX')
-    # 시총 1,500억 이상 & 섹터 정보 있는 종목만 필터링
-    robust_stocks = krx_listing[(krx_listing['Marcap'] >= 150_000_000_000) & (krx_listing['Sector'].notnull())]
+    # 1. 시가총액 데이터와 업종 데이터 병합 (Sector 에러 방지)
+    krx_price = fdr.StockListing('KRX')
+    krx_sector = get_krx_sectors()
+    robust_stocks = pd.merge(krx_price, krx_sector, on='Code', how='inner')
     
-    name_map = dict(zip(robust_stocks['Code'], robust_stocks['Name']))
-    sector_map = dict(zip(robust_stocks['Code'], robust_stocks['Sector']))
+    # 시총 필터링 (1,500억 이상)
+    robust_stocks = robust_stocks[robust_stocks['Marcap'] >= 150_000_000_000]
+    target_market = robust_stocks.head(400)
     
-    portfolio_res, s_grade_list, a_grade_list, sell_list = [], [], [], []
+    portfolio_res, s_list, a_list, sell_list = [], [], [], []
     
     with ThreadPoolExecutor(max_workers=10) as executor:
-        # 1. 보유 종목 분석
-        p_futures = [executor.submit(analyze_stock, code, name_map.get(code, code), sector_map.get(code, "기타"), mkt_status, True) for code in my_stock_codes]
-        # 2. 시장 종목 분석 (상위 400개)
-        m_futures = [executor.submit(analyze_stock, row['Code'], row['Name'], row['Sector'], mkt_status, False) for _, row in robust_stocks.head(400).iterrows()]
+        # 분석 대상 실행
+        p_futures = [executor.submit(analyze_stock, code, row['Name'], row['Sector'], True) 
+                     for code in my_stock_codes for _, row in robust_stocks[robust_stocks['Code']==code].iterrows()]
+        m_futures = [executor.submit(analyze_stock, row['Code'], row['Name'], row['Sector'], False) 
+                     for _, row in target_market.iterrows()]
         
         for future in as_completed(p_futures + m_futures):
             r = future.result()
@@ -125,43 +122,34 @@ def main():
                 elif r['grade']: status = f"✅ 추가매수권장 ({r['grade']}급)"
                 portfolio_res.append(f"- {r['symbol']}({r['name']}): {status}")
             
-            if r['grade'] == 'S': s_grade_list.append(r)
-            elif r['grade'] == 'A': a_grade_list.append(r)
+            if r['grade'] == 'S': s_list.append(r)
+            elif r['grade'] == 'A': a_list.append(r)
             if r['sell_desc'] and not r['is_portfolio']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
-    # 메시지 조립
+    # 메시지 조립 (순서 조정)
     final_msg = f"🌿 **rootee님, 오늘의 투자 리포트**\n\n"
     final_msg += f"📊 **시장 진단**: {mkt_status}\n{mkt_report}\n"
+    final_msg += "🔔 **[긴급] 매도 및 익절 검토**\n" + ("\n".join(sell_list[:7]) if sell_list else "- 현재 과열 종목 없음") + "\n\n"
+    final_msg += "📁 **내 보유 종목 현황**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 등록된 종목 없음") + "\n\n"
     
-    # 1. 매도 추천 (최상단)
-    final_msg += "🔔 **[긴급] 매도 및 익절 검토**\n"
-    final_msg += ("\n".join(sell_list[:7]) if sell_list else "- 현재 과열 종목 없음") + "\n\n"
-    
-    # 2. 내 포트폴리오
-    final_msg += "📁 **내 보유 종목 현황**\n"
-    final_msg += ("\n".join(portfolio_res) if portfolio_res else "- 등록된 종목 없음") + "\n\n"
-    
-    # 3. 섹터별 분류 및 대장주 (S급 & A급 합산 분석)
-    combined_targets = s_grade_list + a_grade_list
-    if combined_targets:
-        df_res = pd.DataFrame(combined_targets)
-        top_sectors = df_res['sector'].value_counts().head(3).index.tolist()
+    # 섹터 대장주 분석
+    combined = pd.DataFrame(s_list + a_list)
+    if not combined.empty:
+        top_sectors = combined['sector'].value_counts().head(3).index.tolist()
         final_msg += f"🔥 **현재 주도 섹터**: {', '.join(top_sectors)}\n\n"
         
         final_msg += "💎 **S급 섹터별 대장주 스캐닝**\n"
-        df_s = pd.DataFrame(s_grade_list)
+        df_s = pd.DataFrame(s_list)
         if not df_s.empty:
             for sector, group in df_s.groupby('sector'):
                 leader = group.loc[group['vol_ratio'].idxmax()]
                 final_msg += f"📂 {sector}\n - 🏆 대장: *{leader['name']}* ({leader['vol_ratio']:.1f}배)\n"
-                others = group[group['symbol'] != leader['symbol']]['name'].tolist()
-                if others: final_msg += f" - 부대장: {', '.join(others[:2])}\n"
         else: final_msg += "- 조건 충족 종목 없음\n"
         
         final_msg += "\n✨ **A급 안정적 추세 섹터**\n"
-        df_a = pd.DataFrame(a_grade_list)
+        df_a = pd.DataFrame(a_list)
         if not df_a.empty:
-            for sector, group in df_a.groupby('sector').head(3).groupby('sector'): # 섹터당 3개씩만
+            for sector, group in df_a.groupby('sector').head(3).groupby('sector'):
                 final_msg += f"- {sector}: {', '.join(group['name'].tolist())}\n"
     
     send_telegram_message(final_msg)
