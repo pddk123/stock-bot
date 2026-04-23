@@ -53,7 +53,6 @@ def get_market_sentiment():
             if chg > -0.5: scores += 1
         except: continue
     
-    # 시장 한줄평 요약
     avg_chg = total_chg / len(indices)
     if avg_chg >= 1.5: summary = "🚀 전체 시장이 뜨거운 '급등장'입니다!"
     elif avg_chg > 0: summary = "📈 훈풍이 부는 '상승세'를 보이고 있습니다."
@@ -82,25 +81,23 @@ def analyze_stock(symbol, name, sentiment, is_portfolio=False):
         df['RSI'] = calculate_rsi(df['Close'])
         
         curr, prev = df.iloc[-1], df.iloc[-2]
-        vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'], df['RSI'].iloc[-1]
+        vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'] if curr['Vol_MA5'] > 0 else 0, df['RSI'].iloc[-1]
         
         res = {'name': name, 'symbol': symbol, 'is_portfolio': is_portfolio, 
                'grade': None, 'desc': "", 'sell_desc': "", 'rsi': rsi_val}
         
         metrics = f"(RSI:{rsi_val:.1f}, 거래량:{vol_ratio:.1f}배)"
 
-        # [매수 로직]
         if sentiment == "BULL":
-            if rsi_val <= 30: res.update({'grade': 'S', 'desc': f"강한 과매도 {metrics}"})
+            if rsi_val <= 30: res.update({'grade': 'S', 'desc': f"🔥 강한 과매도 {metrics}"})
             elif (prev['Close'] < prev['MA20']) and (curr['Close'] > curr['MA20']) and (vol_ratio > 1.0):
-                res.update({'grade': 'S', 'desc': f"20일선 돌파 {metrics}"})
-            elif rsi_val <= 45: res.update({'grade': 'A', 'desc': f"단기 과매도 {metrics}"})
+                res.update({'grade': 'S', 'desc': f"🚀 20일선 골든크로스 {metrics}"})
+            elif rsi_val <= 45: res.update({'grade': 'A', 'desc': f"✨ 단기 과매도 {metrics}"})
             elif (prev['Close'] < prev['MA10']) and (curr['Close'] > prev['MA10']) and (vol_ratio > 0.8):
-                res.update({'grade': 'A', 'desc': f"10일선 반등 {metrics}"})
+                res.update({'grade': 'A', 'desc': f"📈 10일선 반등 {metrics}"})
 
-        # [매도 로직 고도화 적용]
         if rsi_val >= 80:
-            res['sell_desc'] = f"🔥 즉시매도(극심과열) {metrics}"
+            res['sell_desc'] = f"🚨 즉시매도(극심과열) {metrics}"
         elif rsi_val >= 70:
             if curr['Close'] < curr['MA10']:
                 res['sell_desc'] = f"📢 매도결행(추세이탈) {metrics}"
@@ -114,30 +111,38 @@ def main():
     sentiment, mkt_report = get_market_sentiment()
     my_stock_codes = load_portfolio()
     
-    # 이름 매핑 (KRX 전종목 대상)
-    krx_listing = fdr.StockListing('KRX')[['Code', 'Name']]
-    name_map = dict(zip(krx_listing['Code'], krx_listing['Name']))
+    # 1. KRX 전종목 리스팅 (재무 지표 포함)
+    df_krx = fdr.StockListing('KRX')
     
-    k200, kd150 = fdr.StockListing('KOSPI').head(200), fdr.StockListing('KOSDAQ').head(150)
-    total_market = pd.concat([k200, kd150])
+    # 2. 건실한 기업 필터링 로직 (동근 님 맞춤형)
+    # - 시가총액(MarCap) 2,000억 이상
+    # - PBR 0.3 이상 (자산 가치 기반)
+    # - [필터] 바이오 섹터이면서 적자(PER <= 0)인 종목 제외
+    bio_keywords = '의약|제약|바이오|생물|헬스케어'
+    mask = (df_krx['MarCap'] >= 200_000_000_000) & (df_krx['PBR'] >= 0.3)
+    is_red_bio = (df_krx['PER'] <= 0) & (df_krx['Sector'].str.contains(bio_keywords, na=False))
+    
+    healthy_stocks = df_krx[mask & ~is_red_bio]
+    
+    # 건실한 종목 중 시총 상위 350개를 분석 대상으로 선정
+    total_market = healthy_stocks.sort_values(by='MarCap', ascending=False).head(350)
+    name_map = dict(zip(df_krx['Code'], df_krx['Name']))
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
     
     with ThreadPoolExecutor(max_workers=10) as executor:
-        # 1. 보유 종목 분석 (무조건 수행)
+        # 보유 종목과 시장 종목 병렬 분석
         p_futures = [executor.submit(analyze_stock, code, name_map.get(code, code), sentiment, True) for code in my_stock_codes]
-        # 2. 시장 분석
         m_futures = [executor.submit(analyze_stock, row['Code'], row['Name'], sentiment, False) for _, row in total_market.iterrows()]
         
         for future in as_completed(p_futures + m_futures):
             r = future.result()
             if not r: continue
             
-            # [중복 제거 로직] 보유 종목이면 포트폴리오 섹션에만 표시
             if r['is_portfolio']:
-                status = "보유유지"
-                if r['sell_desc']: status = f"매도검토({r['sell_desc']})"
-                elif r['grade']: status = f"추가매수권장({r['grade']}급: {r['desc']})"
+                status = "✅ 보유유지"
+                if r['sell_desc']: status = f"🚩 매도검토({r['sell_desc']})"
+                elif r['grade']: status = f"💰 추가매수권장({r['grade']}급: {r['desc']})"
                 portfolio_res.append(f"- {r['symbol']}({r['name']}): {status}")
             else:
                 if r['grade'] == 'S': s_list.append(f"- *{r['name']}*: {r['desc']}")
@@ -147,9 +152,9 @@ def main():
     # 메시지 조립
     report = f"{mkt_report}\n"
     report += "📁 내 보유 종목 현황\n" + ("\n".join(portfolio_res) if portfolio_res else "- 등록된 종목 없음") + "\n\n"
-    report += "💎 S급 필승 후보\n" + ("\n".join(s_list[:10]) if s_list else "- 없음") + "\n\n"
-    report += "✨ A급 관심 후보\n" + ("\n".join(a_list[:10]) if a_list else "- 없음") + "\n\n"
-    report += "🔔 매도 추천 리스트\n" + ("\n".join(sell_list[:10]) if sell_list else "- 없음")
+    report += "💎 S급 건실 후보 (스윙 추천)\n" + ("\n".join(s_list[:10]) if s_list else "- 조건 충족 종목 없음") + "\n\n"
+    report += "✨ A급 관심 후보\n" + ("\n".join(a_list[:10]) if a_list else "- 조건 충족 종목 없음") + "\n\n"
+    report += "🔔 매도 알림 (과열/이탈)\n" + ("\n".join(sell_list[:10]) if sell_list else "- 해당 없음")
     
     send_telegram_message(report)
 
