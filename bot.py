@@ -127,7 +127,7 @@ def main():
 
     # 2. 안전한 필터링 (컬럼 존재 여부 체크)
     cols = df_krx.columns
-    mask = (df_krx['MarCap'] >= 200_000_000_000) # 시총 2,000억 이상
+    mask = (df_krx['MarketCap'] >= 200_000_000_000) # 시총 2,000억 이상
     
     if 'PBR' in cols:
         mask &= (df_krx['PBR'] >= 0.3)
@@ -141,7 +141,7 @@ def main():
     healthy_stocks = df_krx[mask & ~is_red_bio]
     
     # 건실한 종목 중 상위 300개 분석
-    total_market = healthy_stocks.sort_values(by='MarCap', ascending=False).head(300)
+    total_market = healthy_stocks.sort_values(by='MarketCap', ascending=False).head(300)
     name_map = dict(zip(df_krx['Code'], df_krx['Name']))
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
