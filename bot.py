@@ -71,11 +71,11 @@ def calculate_rsi(series, period=14):
     up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
     ema_up = up.ewm(com=period - 1, adjust=False).mean()
     ema_down = down.ewm(com=period - 1, adjust=False).mean()
-    rs = ema_up / ema_down
+    rs = ema_up / ema_down.replace(0, 0.001) # 0 나누기 방지
     return 100 - (100 / (1 + rs))
 
 def analyze_stock(symbol, name, sentiment, is_portfolio=False):
-    """개별 종목 기술적 분석"""
+    """개별 종목 기술적 분석 및 거래량 필터"""
     try:
         df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=130)).strftime('%Y-%m-%d'))
         if len(df) < 35: return None
@@ -85,9 +85,18 @@ def analyze_stock(symbol, name, sentiment, is_portfolio=False):
         df['RSI'] = calculate_rsi(df['Close'])
         
         curr, prev = df.iloc[-1], df.iloc[-2]
+        
+        # [거래량 하한선 필터]
+        # 1. 오늘 거래량이 0인 종목은 즉시 제외
+        if curr['Volume'] <= 0: return None
+        
         vol_ma5_val = curr['Vol_MA5'] if curr['Vol_MA5'] > 0 else 1
         vol_ratio, rsi_val = curr['Volume'] / vol_ma5_val, curr['RSI']
         
+        # 2. 거래량 하한선: 최근 5일 평균 거래량의 20% 미만인 소외주 제외
+        # (매수하고 싶어도 호가가 비어있을 확률이 높음)
+        if vol_ratio < 0.2: return None
+
         res = {'name': name, 'symbol': symbol, 'is_portfolio': is_portfolio, 
                'grade': None, 'desc': "", 'sell_desc': "", 'rsi': rsi_val}
         
@@ -123,20 +132,22 @@ def main():
         print(f"Error fetching KRX listing: {e}")
         return
 
-    # [자동 컬럼 감지 로직]
-    # 'MarCap'이든 'MarketCap'이든 상관없이 시가총액 컬럼을 찾아냅니다.
     cols = df_krx.columns
     marcap_col = 'MarCap' if 'MarCap' in cols else 'MarketCap' if 'MarketCap' in cols else None
     
+    # [1. 기본 재무 필터]
     if marcap_col:
-        mask = (df_krx[marcap_col] >= 200_000_000_000)
+        mask = (df_krx[marcap_col] >= 200_000_000_000) # 시총 2,000억 이상
     else:
-        print("Market Cap column not found!")
         mask = pd.Series(True, index=df_krx.index)
     
     if 'PBR' in cols:
         mask &= (df_krx['PBR'] >= 0.3)
         
+    # [2. 스팩 및 제N호 종목 제외] - 이름으로 필터링
+    mask &= ~(df_krx['Name'].str.contains('스팩|제\d+호', na=False))
+    
+    # [3. 적자 바이오 제외]
     is_red_bio = pd.Series(False, index=df_krx.index)
     if 'PER' in cols and 'Sector' in cols:
         bio_keywords = '의약|제약|바이오|생물|헬스케어'
@@ -144,8 +155,8 @@ def main():
     
     healthy_stocks = df_krx[mask & ~is_red_bio]
     
-    # 건실한 종목 상위 300개 분석
-    total_market = healthy_stocks.sort_values(by=marcap_col if marcap_col else 'Code', ascending=False).head(300)
+    # 건실한 종목 상위 350개 분석
+    total_market = healthy_stocks.sort_values(by=marcap_col if marcap_col else 'Code', ascending=False).head(350)
     name_map = dict(zip(df_krx['Code'], df_krx['Name']))
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
@@ -169,9 +180,10 @@ def main():
                 elif r['grade'] == 'A': a_list.append(f"- {r['name']}: {r['desc']}")
                 if r['sell_desc']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
+    # 리포트 조립
     report = f"{mkt_report}\n"
     report += "📁 내 보유 종목 현황\n" + ("\n".join(portfolio_res) if portfolio_res else "- 등록된 종목 없음") + "\n\n"
-    report += "💎 S급 건실 후보\n" + ("\n".join(s_list[:10]) if s_list else "- 없음") + "\n\n"
+    report += "💎 S급 건실 후보 (스팩제외)\n" + ("\n".join(s_list[:10]) if s_list else "- 없음") + "\n\n"
     report += "✨ A급 관심 후보\n" + ("\n".join(a_list[:10]) if a_list else "- 없음") + "\n\n"
     report += "🔔 매도 알림\n" + ("\n".join(sell_list[:10]) if sell_list else "- 해당 없음")
     
