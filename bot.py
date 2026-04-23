@@ -85,7 +85,6 @@ def analyze_stock(symbol, name, sentiment, is_portfolio=False):
         df['RSI'] = calculate_rsi(df['Close'])
         
         curr, prev = df.iloc[-1], df.iloc[-2]
-        # 거래량 0 방어 로직
         vol_ma5_val = curr['Vol_MA5'] if curr['Vol_MA5'] > 0 else 1
         vol_ratio, rsi_val = curr['Volume'] / vol_ma5_val, curr['RSI']
         
@@ -118,21 +117,26 @@ def main():
     sentiment, mkt_report = get_market_sentiment()
     my_stock_codes = load_portfolio()
     
-    # 1. KRX 전종목 데이터 확보
     try:
         df_krx = fdr.StockListing('KRX')
     except Exception as e:
         print(f"Error fetching KRX listing: {e}")
         return
 
-    # 2. 안전한 필터링 (컬럼 존재 여부 체크)
+    # [자동 컬럼 감지 로직]
+    # 'MarCap'이든 'MarketCap'이든 상관없이 시가총액 컬럼을 찾아냅니다.
     cols = df_krx.columns
-    mask = (df_krx['MarketCap'] >= 200_000_000_000) # 시총 2,000억 이상
+    marcap_col = 'MarCap' if 'MarCap' in cols else 'MarketCap' if 'MarketCap' in cols else None
+    
+    if marcap_col:
+        mask = (df_krx[marcap_col] >= 200_000_000_000)
+    else:
+        print("Market Cap column not found!")
+        mask = pd.Series(True, index=df_krx.index)
     
     if 'PBR' in cols:
         mask &= (df_krx['PBR'] >= 0.3)
         
-    # 적자 바이오 제외 로직 (안전한 문자열 처리)
     is_red_bio = pd.Series(False, index=df_krx.index)
     if 'PER' in cols and 'Sector' in cols:
         bio_keywords = '의약|제약|바이오|생물|헬스케어'
@@ -140,13 +144,13 @@ def main():
     
     healthy_stocks = df_krx[mask & ~is_red_bio]
     
-    # 건실한 종목 중 상위 300개 분석
-    total_market = healthy_stocks.sort_values(by='MarketCap', ascending=False).head(300)
+    # 건실한 종목 상위 300개 분석
+    total_market = healthy_stocks.sort_values(by=marcap_col if marcap_col else 'Code', ascending=False).head(300)
     name_map = dict(zip(df_krx['Code'], df_krx['Name']))
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
     
-    print(f"Analyzing {len(total_market)} healthy stocks...")
+    print(f"Analyzing {len(total_market)} stocks...")
     with ThreadPoolExecutor(max_workers=8) as executor:
         p_futures = [executor.submit(analyze_stock, code, name_map.get(code, code), sentiment, True) for code in my_stock_codes]
         m_futures = [executor.submit(analyze_stock, row['Code'], row['Name'], sentiment, False) for _, row in total_market.iterrows()]
@@ -165,7 +169,6 @@ def main():
                 elif r['grade'] == 'A': a_list.append(f"- {r['name']}: {r['desc']}")
                 if r['sell_desc']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
-    # 3. 리포트 조립 및 전송
     report = f"{mkt_report}\n"
     report += "📁 내 보유 종목 현황\n" + ("\n".join(portfolio_res) if portfolio_res else "- 등록된 종목 없음") + "\n\n"
     report += "💎 S급 건실 후보\n" + ("\n".join(s_list[:10]) if s_list else "- 없음") + "\n\n"
