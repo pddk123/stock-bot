@@ -19,8 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # 필요한 것들만 군더더기 없이 설치합니다.
-          pip install finance-datareader pandas==1.5.3 requests lxml pykrx
+          pip install pandas finance-datareader requests lxml pykrx
 
       - name: Run bot
         env:
