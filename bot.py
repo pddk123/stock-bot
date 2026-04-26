@@ -18,7 +18,7 @@ def send_telegram_message(message):
     except: pass
 
 def get_market_fundamental():
-    """pykrx 데이터 정제 (하이픈 제거 로직 추가)"""
+    """재무 데이터 수집 및 정제"""
     target_date = datetime.now().strftime("%Y%m%d")
     try:
         df = stock.get_market_fundamental_by_date(target_date, target_date, "ALL")
@@ -26,10 +26,9 @@ def get_market_fundamental():
             target_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
             df = stock.get_market_fundamental_by_date(target_date, target_date, "ALL")
         
-        # 🌟 [에러 해결 포인트] 하이픈(-)을 0으로 바꾸고 숫자로 강제 변환
+        # 데이터 정제: 하이픈 제거 및 숫자 변환
         df = df.replace('-', '0')
         df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
-        
         return df.reset_index().rename(columns={'티커': 'Code'})
     except:
         return pd.DataFrame()
@@ -60,7 +59,8 @@ def get_market_sentiment():
             details.append(f"- {name}: {chg:+.2f}%")
             if chg > -0.1: scores += 1
         except: continue
-    if not details: return "📊 **진단 불가**", "서버 지연", ""
+    
+    if not details: return "📊 **진단 불가**", "서버 연결 지연", ""
     avg_chg = total_chg / len(details)
     status = "🚀 **강력 상승장**" if scores >= 3 and avg_chg > 0.4 else ("📈 **완만한 상승장**" if scores >= 2 else "📉 **하락 구간**")
     return status, f"글로벌 평균 {avg_chg:+.2f}% 기반", "\n".join(details)
@@ -76,17 +76,19 @@ def analyze_stock(symbol, name, sector, pbr, per, is_portfolio=False):
     try:
         df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d'))
         if len(df) < 30: return None
+        
         df['MA10'], df['MA20'] = df['Close'].rolling(10).mean(), df['Close'].rolling(20).mean()
         df['Vol_MA5'] = df['Volume'].rolling(5).mean()
         df['RSI'] = calculate_rsi(df['Close'])
+        
         curr = df.iloc[-1]
         vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'], df['RSI'].iloc[-1]
         
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
                'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'pbr': pbr, 'per': per, 'sell_desc': ""}
         
-        # 듬직한 우량주 조건
-        is_dependable = (0.5 <= pbr <= 4.0) and (0 < per <= 35) # PER이 0인(적자) 기업은 제외
+        # 듬직한 우량주 조건 (PBR 0.5 ~ 4.0)
+        is_dependable = (0.5 <= pbr <= 4.0) and (0 < per <= 35)
         
         if is_dependable and (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5):
             res.update({'grade': 'S'})
@@ -101,21 +103,30 @@ def main():
     mkt_status, mkt_reason, mkt_report = get_market_sentiment()
     my_codes = load_portfolio()
     
+    # 데이터 로드 및 병합
     krx_listing = fdr.StockListing('KRX')
     fund_df = get_market_fundamental()
-    
-    # 데이터 병합 및 결측치 처리
     all_stocks = pd.merge(krx_listing, fund_df, on='Code', how='left')
+    
+    # 결측치 및 자료형 처리
     all_stocks[['PBR', 'PER']] = all_stocks[['PBR', 'PER']].fillna(99)
     all_stocks['Sector'] = all_stocks['Sector'].fillna('기타')
     
+    # 시총 5,000억 이상 필터링
     robust_market = all_stocks[all_stocks['Marcap'] >= 500_000_000_000]
     
     portfolio_res, s_list, a_list = [], [], []
     
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        p_tasks = [executor.submit(analyze_stock, code, row['Name'], row['Sector'], row['PBR'], row['PER'], True) 
-                   for code in my_codes for _, row in all_stocks[all_stocks['Code']==code].iterrows()]
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # 내 포트폴리오 분석
+        p_tasks = []
+        for code in my_codes:
+            stock_info = all_stocks[all_stocks['Code'] == code]
+            if not stock_info.empty:
+                row = stock_info.iloc[0]
+                p_tasks.append(executor.submit(analyze_stock, code, row['Name'], row['Sector'], row['PBR'], row['PER'], True))
+        
+        # 시장 우량주 분석
         m_tasks = [executor.submit(analyze_stock, row['Code'], row['Name'], row['Sector'], row['PBR'], row['PER'], False) 
                    for _, row in robust_market.iterrows()]
         
@@ -128,11 +139,13 @@ def main():
                 if r['grade'] == 'S': s_list.append(r)
                 elif r['grade'] == 'A': a_list.append(r)
 
+    # 결과 정렬
     s_list = sorted(s_list, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_list[:5]
     final_a = (s_list[5:] + sorted(a_list, key=lambda x: x['vol_ratio'], reverse=True))[:10]
 
-    msg = f"🌿 **rootee님, 듬직한 우량주 리포트**\n\n📊 **시장**: {mkt_status}\n🧐 **근거**: {mkt_reason}\n{mkt_report}\n\n"
+    # 메시지 생성
+    msg = f"🌿 **rootee님, 듬직한 우량주 리포트 (v4.2)**\n\n📊 **시장**: {mkt_status}\n🧐 **근거**: {mkt_reason}\n{mkt_report}\n\n"
     msg += "📁 **내 보유 종목**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
     msg += "💎 **S급: 저평가 우량주 (PBR 0.5~4.0)**\n"
     if final_s:
@@ -140,6 +153,7 @@ def main():
     else: msg += "- 조건 충족 없음\n"
     msg += "\n✨ **A급: 안정적 추세안착**\n"
     msg += "\n".join([f"- {r['name']}: (RSI:{r['rsi']:.1f}, PBR:{r['pbr']:.1f})" for r in final_a]) if final_a else "- 없음"
+    
     send_telegram_message(msg)
 
 if __name__ == "__main__":
