@@ -2,24 +2,31 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    - cron: '00 23 * * *'
-  workflow_dispatch:
+    # 한국 시간(KST) 오전 09:49 실행 (UTC 00:49)
+    # 월요일부터 금요일까지(1-5)만 작동합니다.
+    - cron: '49 00 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          # 최신 보안 정책 대응을 위해 -U 옵션과 lxml 추가
           pip install -U finance-datareader pandas requests lxml
+
       - name: Run bot
-        env: # 🌟 이 부분이 추가되었습니다!
+        env:
+          # 깃허브 Settings -> Secrets에 저장된 값들을 불러옵니다.
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot.py
