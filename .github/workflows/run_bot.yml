@@ -23,6 +23,11 @@ jobs:
           pip install --upgrade pip
           # 최신 보안 정책 대응을 위해 -U 옵션과 lxml 추가
           pip install -U finance-datareader pandas requests lxml
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -U finance-datareader pandas requests lxml pykrx
 
       - name: Run bot
         env:
