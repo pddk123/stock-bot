@@ -2,7 +2,6 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    # 한국 시간(KST) 오전 09:49 실행 (UTC 00:49)
     - cron: '49 00 * * 1-5'
   workflow_dispatch:
 
@@ -20,8 +19,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # 딱 이 한 줄만 있으면 됩니다. Pandas 1.5.3으로 강제 고정!
-          pip install pandas==1.5.3 finance-datareader requests lxml pykrx
+          # 최신 버전으로 싹 설치해서 라이브러리끼리 알아서 맞추게 합니다.
+          pip install finance-datareader pandas requests lxml pykrx
 
       - name: Run bot
         env:
