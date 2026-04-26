@@ -16,14 +16,16 @@ def send_telegram_message(message):
     try: requests.post(url, json=payload)
     except: pass
 
-def get_krx_sectors():
-    """KIND에서 업종 정보 확보"""
+def get_krx_sectors_and_status():
+    """KIND에서 업종 정보 및 관리종목 여부 확인"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+        # 상장법인 목록 (여기서 관리종목 등 필터링 가능)
         url = 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13'
         response = requests.get(url, headers=headers, timeout=15)
         df = pd.read_html(response.text, header=0)[0]
         df['종목코드'] = df['종목코드'].apply(lambda x: f"{x:06d}")
+        # '업종'과 '주요제품' 등을 가져옴 (여기서 부실 징후 필터링 로직 추가 가능)
         return df[['종목코드', '업종']].rename(columns={'종목코드':'Code', '업종':'Sector'})
     except:
         return pd.DataFrame(columns=['Code', 'Sector'])
@@ -80,6 +82,7 @@ def analyze_stock(symbol, name, sector, is_portfolio=False):
         vol_ratio, rsi_val = curr['Volume'] / curr['Vol_MA5'], df['RSI'].iloc[-1]
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
                'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'sell_desc': ""}
+        # 등급 판정
         if (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5):
             res.update({'grade': 'S'})
         elif (rsi_val > 50) and (curr['Close'] > curr['MA10']) and (vol_ratio >= 1.0):
@@ -92,12 +95,12 @@ def main():
     mkt_status, mkt_reason, mkt_report = get_market_sentiment()
     my_codes = load_portfolio()
     
-    krx_price = fdr.StockListing('KRX')
-    krx_sector = get_krx_sectors()
-    all_stocks = pd.merge(krx_price, krx_sector, on='Code', how='left').fillna({'Sector': '기타'})
+    krx_listing = fdr.StockListing('KRX')
+    krx_info = get_krx_sectors_and_status()
+    all_stocks = pd.merge(krx_listing, krx_info, on='Code', how='left').fillna({'Sector': '기타'})
     
-    # 필터링: 시총 1,500억 이상 상위 350개
-    robust_market = all_stocks[all_stocks['Marcap'] >= 150_000_000_000].head(350)
+    # 🌟 [필터 1] 시가총액 5,000억 이상만 (상위 약 600여개)
+    robust_market = all_stocks[all_stocks['Marcap'] >= 500_000_000_000]
     
     portfolio_res, s_list, a_list, sell_list = [], [], [], []
     
@@ -120,16 +123,16 @@ def main():
                 elif r['grade'] == 'A': a_list.append(r)
                 if r['sell_desc']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
-    # S급 정렬 및 슬라이싱 (거래량순)
+    # 🌟 [로직 2] S급 5개 선별 & 나머지 A급 이동
     s_list = sorted(s_list, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_list[:5]
-    overflow_s = s_list[5:] # 5위 밖 S급은 A급으로 이동
+    overflow_s = s_list[5:]
     
-    # A급 리스트 구성 (우선순위: overflow_s -> 원래 a_list)
-    final_a = (overflow_s + a_list)[:10]
+    # 🌟 [로직 3] A급 최대 10개 (밀려난 S급 최우선)
+    final_a = (overflow_s + sorted(a_list, key=lambda x: x['vol_ratio'], reverse=True))[:10]
 
-    # 메시지 조립 (마지막에 준 3.4~3.5 스타일 포맷)
-    final_msg = f"🌿 **rootee님, 실시간 투자 리포트**\n\n"
+    # 메시지 조립
+    final_msg = f"🌿 **rootee님, 우량주 스캐닝 리포트**\n\n"
     final_msg += f"📊 **시장 진단**: {mkt_status}\n🧐 **판단 근거**: {mkt_reason}\n{mkt_report}\n\n"
     
     combined_for_sector = pd.DataFrame(final_s + final_a)
@@ -139,7 +142,7 @@ def main():
 
     final_msg += "📁 **내 보유 종목**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
     
-    final_msg += "💎 **S급: 추세 폭발 초입 (Max 5)**\n"
+    final_msg += "💎 **S급: 우량주 추세 폭발 (Max 5)**\n"
     if final_s:
         df_s = pd.DataFrame(final_s)
         leaders = df_s.groupby('sector')['vol_ratio'].idxmax()
@@ -148,15 +151,13 @@ def main():
             final_msg += f"- {row['name']}: (RSI:{row['rsi']:.1f}, 거래량:{row['vol_ratio']:.1f}배{tag})\n"
     else: final_msg += "- 조건 충족 없음\n"
     
-    final_msg += "\n✨ **A급: 안정적 추세안착 (Max 10)**\n"
+    final_msg += "\n✨ **A급: 우량주 추세 안착 (Max 10)**\n"
     if final_a:
         for r in final_a:
-            # 밀려난 S급은 따로 표시 가능하지만, 요청대로 A급 리스트에 포함
             final_msg += f"- {r['name']}: (RSI:{r['rsi']:.1f}, 거래량:{r['vol_ratio']:.1f}배)\n"
     else: final_msg += "- 조건 충족 없음\n"
     
     final_msg += "\n🔔 **익절/매도 검토 (리스크 관리)**\n" + ("\n".join(sell_list[:7]) if sell_list else "- 과열 종목 없음")
-    
     send_telegram_message(final_msg)
 
 if __name__ == "__main__":
