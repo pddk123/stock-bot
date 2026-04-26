@@ -21,9 +21,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # 필요한 모든 라이브러리를 한 번에 설치합니다 (pykrx 포함)
-          pip install -U finance-datareader pandas requests lxml pykrx
-
+          # Pandas 1.5.3으로 고정하고 나머지 라이브러리들을 한꺼번에 설치합니다.
+          pip install pandas==1.5.3 finance-datareader requests lxml pykrx
+   
       - name: Run bot
         env:
           # 깃허브 Settings -> Secrets에 저장된 값들을 불러옵니다.
