@@ -21,12 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          # 최신 보안 정책 대응을 위해 -U 옵션과 lxml 추가
-          pip install -U finance-datareader pandas requests lxml
-      
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
+          # 필요한 모든 라이브러리를 한 번에 설치합니다 (pykrx 포함)
           pip install -U finance-datareader pandas requests lxml pykrx
 
       - name: Run bot
