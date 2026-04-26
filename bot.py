@@ -18,14 +18,18 @@ def send_telegram_message(message):
     except: pass
 
 def get_market_fundamental():
-    """pykrx를 이용해 전 종목의 PBR, PER 데이터를 한 번에 가져옴"""
+    """pykrx 데이터 정제 (하이픈 제거 로직 추가)"""
     target_date = datetime.now().strftime("%Y%m%d")
     try:
         df = stock.get_market_fundamental_by_date(target_date, target_date, "ALL")
-        # 최근 1주일 내 데이터가 없을 경우를 대비해 이전 영업일 시도
         if df.empty:
             target_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
             df = stock.get_market_fundamental_by_date(target_date, target_date, "ALL")
+        
+        # 🌟 [에러 해결 포인트] 하이픈(-)을 0으로 바꾸고 숫자로 강제 변환
+        df = df.replace('-', '0')
+        df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
         return df.reset_index().rename(columns={'티커': 'Code'})
     except:
         return pd.DataFrame()
@@ -81,9 +85,8 @@ def analyze_stock(symbol, name, sector, pbr, per, is_portfolio=False):
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
                'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'pbr': pbr, 'per': per, 'sell_desc': ""}
         
-        # 🌟 듬직한 S/A 등급 조건 (PBR 필터 적용)
-        # S급: RSI 45~62, 정배열, 거래량 폭발 AND (0.5 <= PBR <= 4.0)
-        is_dependable = (0.5 <= pbr <= 4.0) and (per <= 35) # PER 35 초과(거품) 제외
+        # 듬직한 우량주 조건
+        is_dependable = (0.5 <= pbr <= 4.0) and (0 < per <= 35) # PER이 0인(적자) 기업은 제외
         
         if is_dependable and (45 <= rsi_val <= 62) and (curr['Close'] > curr['MA10'] > curr['MA20']) and (vol_ratio >= 1.5):
             res.update({'grade': 'S'})
@@ -98,15 +101,17 @@ def main():
     mkt_status, mkt_reason, mkt_report = get_market_sentiment()
     my_codes = load_portfolio()
     
-    # 데이터 병합
     krx_listing = fdr.StockListing('KRX')
     fund_df = get_market_fundamental()
-    all_stocks = pd.merge(krx_listing, fund_df, on='Code', how='left').fillna({'PBR': 99, 'PER': 99, 'Sector': '기타'})
     
-    # 🌟 [필터] 시총 5,000억 이상 + 관리종목 제외 (fdr 리스팅에서 걸러짐)
+    # 데이터 병합 및 결측치 처리
+    all_stocks = pd.merge(krx_listing, fund_df, on='Code', how='left')
+    all_stocks[['PBR', 'PER']] = all_stocks[['PBR', 'PER']].fillna(99)
+    all_stocks['Sector'] = all_stocks['Sector'].fillna('기타')
+    
     robust_market = all_stocks[all_stocks['Marcap'] >= 500_000_000_000]
     
-    portfolio_res, s_list, a_list, sell_list = [], [], [], []
+    portfolio_res, s_list, a_list = [], [], []
     
     with ThreadPoolExecutor(max_workers=12) as executor:
         p_tasks = [executor.submit(analyze_stock, code, row['Name'], row['Sector'], row['PBR'], row['PER'], True) 
@@ -122,14 +127,11 @@ def main():
             else:
                 if r['grade'] == 'S': s_list.append(r)
                 elif r['grade'] == 'A': a_list.append(r)
-                if r['sell_desc'] and r['is_portfolio']: sell_list.append(f"- {r['name']}: {r['sell_desc']}")
 
-    # S급 5개 & A급 10개 정렬
     s_list = sorted(s_list, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_list[:5]
     final_a = (s_list[5:] + sorted(a_list, key=lambda x: x['vol_ratio'], reverse=True))[:10]
 
-    # 메시지 조립
     msg = f"🌿 **rootee님, 듬직한 우량주 리포트**\n\n📊 **시장**: {mkt_status}\n🧐 **근거**: {mkt_reason}\n{mkt_report}\n\n"
     msg += "📁 **내 보유 종목**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
     msg += "💎 **S급: 저평가 우량주 (PBR 0.5~4.0)**\n"
