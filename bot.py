@@ -17,10 +17,8 @@ def send_telegram_message(message):
     except: pass
 
 def get_kind_managed_stocks():
-    """KIND에서 관리종목/투자주의 종목 리스트 확보 (부실주 필터)"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # 관리종목 리스트
         url = 'https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=05'
         res = requests.get(url, headers=headers)
         df = pd.read_html(res.text, header=0)[0]
@@ -50,102 +48,86 @@ def analyze_stock(symbol, name, sector, is_portfolio=False):
         if df is None or len(df) < 30: return None
         
         # 지표 계산
-        ma10 = df['Close'].rolling(10).mean().iloc[-1]
-        ma20 = df['Close'].rolling(20).mean().iloc[-1]
-        ma60 = df['Close'].rolling(60).mean().iloc[-1]
+        ma10, ma20, ma60 = df['Close'].rolling(10).mean().iloc[-1], df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(60).mean().iloc[-1]
         vol_ma5 = df['Volume'].rolling(5).mean().iloc[-1]
         rsi_val = calculate_rsi(df['Close'])
         curr_price = df['Close'].iloc[-1]
         vol_ratio = df['Volume'].iloc[-1] / vol_ma5 if vol_ma5 > 0 else 0
-        
-        # [신규 지표] 거래대금 (단위: 억)
         avg_amount = (df['Close'] * df['Volume']).rolling(5).mean().iloc[-1] / 100_000_000
 
         res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio, 
-               'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'amount': avg_amount, 'sell_desc': ""}
+               'grade': None, 'rsi': rsi_val, 'vol_ratio': vol_ratio, 'amount': avg_amount, 'action': "보유 유지"}
         
-        # 🌟 듬직한 우량주 필터 (정배열 + 거래대금)
-        # 1. 정배열 (10일 > 20일 > 60일): 추세가 확실히 살아있는 듬직한 놈
-        # 2. 거래대금 상위: 하루 평균 50억 이상 거래되는 활발한 놈
-        is_dependable = (curr_price > ma10 > ma20 > ma60) and (avg_amount >= 50)
+        # 1. 포트폴리오 액션 로직
+        if is_portfolio:
+            if rsi_val >= 70: res['action'] = "🚨 **매도 추천 (과열)**"
+            elif rsi_val <= 45 and curr_price > ma60: res['action'] = "✅ **추가 매수 추천**"
+            else: res['action'] = "💎 **보유 유지**"
         
-        if is_dependable and (45 <= rsi_val <= 62) and (vol_ratio >= 1.5):
-            res.update({'grade': 'S'})
-        elif (rsi_val > 50) and (curr_price > ma10) and (vol_ratio >= 1.0):
-            res.update({'grade': 'A'})
+        # 2. 신규 추천 로직 (RSI 70 이상은 아예 추천에서 제외)
+        if not is_portfolio:
+            is_dependable = (curr_price > ma10 > ma20 > ma60) and (avg_amount >= 50) and (rsi_val < 70)
+            if is_dependable and (45 <= rsi_val <= 62) and (vol_ratio >= 1.5):
+                res.update({'grade': 'S'})
+            elif (rsi_val > 50 and rsi_val < 70) and (curr_price > ma10) and (vol_ratio >= 1.0):
+                res.update({'grade': 'A'})
         
-        if rsi_val >= 70: res['sell_desc'] = f"🔔 매도검토(RSI:{rsi_val:.1f})"
         return res
     except: return None
 
 def main():
-    # 1. 시장 상황 파악
-    mkt_report = []
-    try:
-        for name, ticker in {'Nasdaq': '^IXIC', 'KOSPI': 'KS11', 'KOSDAQ': 'KQ11'}.items():
+    # 시장 상황 파악
+    mkt_report, up_count = [], 0
+    indices = {'Nasdaq': '^IXIC', 'KOSPI': 'KS11', 'KOSDAQ': 'KQ11'}
+    for name, ticker in indices.items():
+        try:
             idx_df = fdr.DataReader(ticker, (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
             chg = (idx_df['Close'].iloc[-1] - idx_df['Close'].iloc[-2]) / idx_df['Close'].iloc[-2] * 100
             mkt_report.append(f"- {name}: {chg:+.2f}%")
-    except: pass
+            if chg > 0: up_count += 1
+        except: pass
+    
+    # 시장 진단 설명
+    if up_count >= 2: 
+        mkt_status = "🚀 **상승장 (Bull Market)**"
+        mkt_desc = "글로벌 기술주와 국내 지수가 동반 상승하며 매수 심리가 우세합니다. 추세 추종 전략이 유효합니다."
+    else:
+        mkt_status = "📉 **하락/조정장 (Bear Market)**"
+        mkt_desc = "주요 지수가 힘을 못 쓰고 있습니다. 무리한 진입보다는 현금 비중을 유지하며 S급 신호를 기다릴 때입니다."
 
-    # 2. 종목 리스트 및 부실주 필터
     krx = fdr.StockListing('KRX')
     managed_codes = get_kind_managed_stocks()
-    
-    # [필터] 시총 5,000억 이상 + 관리종목 제외
     robust = krx[(krx['Marcap'] >= 500_000_000_000) & (~krx['Code'].isin(managed_codes))]
     my_codes = load_portfolio()
     
     portfolio_res, s_list, a_list = [], [], []
-    
     with ThreadPoolExecutor(max_workers=10) as executor:
         tasks = []
-        for _, r in robust.iterrows():
-            tasks.append(executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), False))
+        for _, r in robust.iterrows(): tasks.append(executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), False))
         for c in my_codes:
             match = krx[krx['Code'] == c]
-            if not match.empty:
-                r = match.iloc[0]
-                tasks.append(executor.submit(analyze_stock, c, r['Name'], r.get('Sector', '기타'), True))
+            if not match.empty: tasks.append(executor.submit(analyze_stock, c, match.iloc[0]['Name'], match.iloc[0].get('Sector', '기타'), True))
         
         for f in as_completed(tasks):
             res = f.result()
             if not res: continue
-            if res['is_portfolio']: 
-                portfolio_res.append(f"- {res['name']}: {res['sell_desc'] or '보유'} (RSI:{res['rsi']:.1f}, 거래량:{res['vol_ratio']:.1f}배)")
+            if res['is_portfolio']: portfolio_res.append(f"- {res['name']}: {res['action']} (RSI:{res['rsi']:.1f}, 거래량:{res['vol_ratio']:.1f}배)")
             elif res['grade'] == 'S': s_list.append(res)
             elif res['grade'] == 'A': a_list.append(res)
 
-    # 3. 결과 정렬 (거래량 폭발력 순)
-    s_list = sorted(s_list, key=lambda x: x['vol_ratio'], reverse=True)
-    final_s = s_list[:5]
+    s_list = sorted(s_list, key=lambda x: x['vol_ratio'], reverse=True)[:5]
     final_a = (s_list[5:] + sorted(a_list, key=lambda x: x['vol_ratio'], reverse=True))[:10]
 
-    # 4. 주도 섹터 분석
-    combined = pd.DataFrame(final_s + final_a)
-    top_sector_msg = ""
-    if not combined.empty:
-        top_s = combined[combined['sector'] != '기타']['sector'].value_counts().head(2).index.tolist()
-        if top_s: top_sector_msg = f"🔥 **현재 주도 섹터**: {', '.join(top_s)}\n\n"
-
-    # 5. 최종 메시지 조립 (v3.8 스타일)
-    msg = f"🌿 **rootee님, 듬직한 우량주 리포트 (v4.8)**\n\n📊 **시장 상황**\n" + "\n".join(mkt_report) + "\n\n"
-    msg += top_sector_msg
-    msg += "📁 **내 보유 종목**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
-    
+    # 메시지 조립
+    msg = f"🌿 **rootee님, 듬직한 우량주 리포트 (v4.9)**\n\n"
+    msg += f"📊 **시장 상황: {mkt_status}**\n{mkt_desc}\n" + "\n".join(mkt_report) + "\n\n"
+    msg += "📁 **내 보유 종목 대응**\n" + ("\n".join(portfolio_res) if portfolio_res else "- 없음") + "\n\n"
     msg += "💎 **S급: 추세 폭발 우량주 (Max 5)**\n"
-    if final_s:
-        df_s = pd.DataFrame(final_s)
-        # 섹터별 거래량 대장주 마킹
-        leaders = df_s.groupby('sector')['vol_ratio'].idxmax()
-        for i, r in df_s.iterrows():
-            tag = " 🏆 **대장주**" if i in leaders.values else ""
-            msg += f"- {r['name']}: (RSI:{r['rsi']:.1f}, 거래량:{r['vol_ratio']:.1f}배{tag})\n"
+    if s_list:
+        for r in s_list: msg += f"- {r['name']}: (RSI:{r['rsi']:.1f}, 거래량:{r['vol_ratio']:.1f}배)\n"
     else: msg += "- 조건 충족 없음\n"
-    
     msg += "\n✨ **A급: 안정적 추세 안착 (Max 10)**\n"
-    for r in final_a:
-        msg += f"- {r['name']}: (RSI:{r['rsi']:.1f}, 거래량:{r['vol_ratio']:.1f}배)\n"
+    for r in final_a: msg += f"- {r['name']}: (RSI:{r['rsi']:.1f}, 거래량:{r['vol_ratio']:.1f}배)\n"
     
     send_telegram_message(msg)
 
