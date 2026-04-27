@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas finance-datareader requests lxml pykrx
+          pip install -U finance-datareader pandas requests lxml
 
       - name: Run bot
         env:
