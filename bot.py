@@ -25,7 +25,7 @@ if not logger.handlers:
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
-# 3. 텔레그램 전송
+# 3. 텔레그램 전송 (환경 변수 기반)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
@@ -45,7 +45,7 @@ def send_telegram_report(message):
 # --- [데이터 분석 엔진] ---
 
 def get_weighted_volume_multiplier():
-    """U자형 거래량 곡선 반영 보정 계수 (v5.5)"""
+    """U자형 거래량 곡선 반영 보정 계수"""
     now = get_now_kst()
     if now.weekday() >= 5: return 1.0
     start_market = 9 * 60
@@ -59,7 +59,8 @@ def get_weighted_volume_multiplier():
     return 1.0 / weight
 
 def calculate_rsi_wilder(series, period=14):
-    """Wilder's Smoothing 방식 RSI (v5.5)"""
+    """Wilder's Smoothing 방식 RSI"""
+    if len(series) < period: return 50.0
     delta = series.diff()
     up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
     roll_up = up.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
@@ -68,7 +69,7 @@ def calculate_rsi_wilder(series, period=14):
     return (100.0 - (100.0 / (1.0 + rs))).iloc[-1]
 
 def get_indicators(df, multiplier=1.0):
-    """지표 계산 (v5.5 + MA10 포함)"""
+    """지표 계산 (RSI, MA, 거래량비, 거래대금)"""
     if len(df) < 20: return None
     last_row = df.iloc[-1]
     curr_p = last_row['Close']
@@ -84,13 +85,18 @@ def get_indicators(df, multiplier=1.0):
     return {'price': curr_p, 'ma10': ma10, 'ma20': ma20, 'ma60': ma60, 'rsi': rsi_v, 'vol_ratio': v_ratio, 'amount': amt_억}
 
 def check_grade(ind):
-    """등급 판정 로직 (S/A 등급 기준)"""
+    """S/A 등급 판정 로직"""
     if not ind: return None
+    
+    # S급 조건
     is_s = (ind['price'] > ind['ma10'] > ind['ma20'] > ind['ma60']) and \
            (ind['amount'] >= 50) and (45 <= ind['rsi'] <= 62) and (ind['vol_ratio'] >= 1.5)
     if is_s: return 'S'
+    
+    # A급 조건
     is_a = (ind['price'] > ind['ma10']) and (50 <= ind['rsi'] < 70) and (ind['vol_ratio'] >= 1.0)
     if is_a: return 'A'
+    
     return None
 
 def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
@@ -115,7 +121,7 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
                               'rsi': ind['rsi'], 'vol_ratio': ind['vol_ratio'], 'amount': ind['amount'],
                               'grade': grade, 'action': ""}
                 
-                # --- [v5.6 포트폴리오 5단계 상태 메시지 업데이트] ---
+                # --- [v5.6 보유 종목 5단계 상태 리포트 알림 로직] ---
                 if is_portfolio:
                     if ind['price'] < ind['ma10'] and grade is None:
                         today_res['action'] = "🚨 **탈출 고려 (추세 이탈)**"
@@ -147,22 +153,30 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
 def main():
     logger.info("Smart Picking v5.6 분석 시작")
     
+    # 1. 대상 종목 및 portfolio.txt 읽기
     krx = fdr.StockListing('KRX')
-    robust = krx[krx['Marcap'] >= 500_000_000_000] 
+    robust = krx[krx['Marcap'] >= 500_000_000_000] # 시총 5천억 이상
     
     my_codes = []
     if os.path.exists('portfolio.txt'):
         with open('portfolio.txt', 'r', encoding='utf-8') as f:
             my_codes = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    else:
+        logger.warning("portfolio.txt 파일이 존재하지 않습니다.")
 
     vol_multiplier = get_weighted_volume_multiplier()
     s_cands, a_cands, port_res = [], [], []
 
+    # 2. 병렬 분석 실행
     with ThreadPoolExecutor(max_workers=10) as executor:
+        # 시장 전체 후보 탐색
         tasks = [executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), vol_multiplier, False) for _, r in robust.iterrows()]
+        
+        # 내 보유 종목(portfolio.txt) 정밀 분석
         for c in my_codes:
             m = krx[krx['Code'] == c]
-            if not m.empty: tasks.append(executor.submit(analyze_stock, c, m.iloc[0]['Name'], m.iloc[0].get('Sector', '기타'), vol_multiplier, True))
+            if not m.empty: 
+                tasks.append(executor.submit(analyze_stock, c, m.iloc[0]['Name'], m.iloc[0].get('Sector', '기타'), vol_multiplier, True))
         
         for f in as_completed(tasks):
             res = f.result()
@@ -171,10 +185,12 @@ def main():
             elif res['grade'] == 'S': s_cands.append(res)
             elif res['grade'] == 'A': a_cands.append(res)
 
+    # 3. 리포트 정렬
     s_sorted = sorted(s_cands, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_sorted[:5]
     final_a = sorted(s_sorted[5:] + a_cands, key=lambda x: x['vol_ratio'], reverse=True)[:10]
 
+    # 4. 텔레그램 메시지 조립
     def get_badge(c):
         if c >= 3: return "🔥 **[3일 연속 우수]**"
         if c == 2: return "✅ **[2일 연속 우수]**"
@@ -184,6 +200,7 @@ def main():
     msg += f"📊 분석 기준: KST {get_now_kst().strftime('%H:%M')}\n\n"
     
     msg += "📁 **내 보유 종목 대응**\n"
+    # 포트폴리오 결과 출력 (동근 님이 정한 5단계 상태 적용)
     msg += "\n".join([f"- {r['name']}: {r['action']} (RSI:{r['rsi']:.1f})" for r in port_res]) if port_res else "- 없음"
     msg += "\n\n"
 
