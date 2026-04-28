@@ -13,12 +13,11 @@ def get_now_kst():
     """항상 한국 표준시(KST)를 반환"""
     return datetime.now() + timedelta(hours=9)
 
-# 2. 로깅 설정 (v5.5의 상세 로깅 인프라 복원)
+# 2. 로깅 설정
 logger = logging.getLogger("StockAnalyzer")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # 파일 로그와 터미널 로그 이중화 유지
     file_handler = logging.FileHandler('stock_analyzer.log', encoding='utf-8')
     file_handler.setFormatter(formatter)
     stream_handler = logging.StreamHandler()
@@ -114,17 +113,15 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
             current_mult = multiplier if (is_today and i == 0) else 1.0
             
             ind = get_indicators(target_df, current_mult)
-            if not ind: continue # 지표 계산 실패 시 다음 일자로
+            if not ind: continue
             
             grade = check_grade(ind)
             
             if i == 0:
-                # 당일 분석 데이터 생성
                 today_res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio,
                               'rsi': ind['rsi'], 'vol_ratio': ind['vol_ratio'], 'amount': ind['amount'],
                               'grade': grade, 'action': ""}
                 
-                # --- [v5.6: 내 보유 종목 전용 대응 시그널] ---
                 if is_portfolio:
                     if ind['price'] < ind['ma10'] and grade is None:
                         today_res['action'] = "🚨 **탈출 고려**"
@@ -137,7 +134,6 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
                     else:
                         today_res['action'] = "🧐 **관찰 필요**"
                 
-                # 포트폴리오 종목이 아니면서 등급도 없으면 즉시 종료 (속도 최적화)
                 if not is_portfolio and grade is None: return None
                 if grade: consistency_count = 1
                 else: break 
@@ -156,33 +152,42 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
 def main():
     logger.info("Smart Picking v5.6 Professional 분석 시작")
     
-    # 1. 대상 종목 및 portfolio.txt 로드 (BOM 및 공백 제거 정규화)
+    # 1. 대상 종목 및 portfolio.txt 로드 (주석 처리 로직 개선)
     krx = fdr.StockListing('KRX')
-    robust = krx[krx['Marcap'] >= 500_000_000_000] # 시총 5천억 이상 우량주
+    robust = krx[krx['Marcap'] >= 500_000_000_000] 
     
     my_codes = []
-    if os.path.exists('portfolio.txt'):
-        # utf-8-sig로 인코딩 문제 방지, zfill(6)으로 005930 형태 강제
-        with open('portfolio.txt', 'r', encoding='utf-8-sig') as f:
-            my_codes = [line.strip().zfill(6) for line in f if line.strip() and not line.startswith('#')]
-        logger.info(f"포트폴리오 종목 로드 완료: {len(my_codes)}개")
+    # 파일 실행 경로와 상관없이 파일을 찾도록 절대 경로 설정
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    portfolio_file = os.path.join(base_dir, 'portfolio.txt')
+
+    if os.path.exists(portfolio_file):
+        with open(portfolio_file, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                clean_line = line.strip()
+                # 빈 줄이거나 줄 자체가 #으로 시작하면 건너뜀
+                if not clean_line or clean_line.startswith('#'):
+                    continue
+                
+                # 줄 중간에 #이 있는 경우 (예: 005930 #삼성전자) 앞부분만 추출
+                code = clean_line.split('#')[0].strip().zfill(6)
+                my_codes.append(code)
+        logger.info(f"포트폴리오 종목 로드 완료: {len(my_codes)}개 ({', '.join(my_codes)})")
     else:
-        logger.warning("portfolio.txt 파일을 찾을 수 없습니다.")
+        logger.warning(f"portfolio.txt 파일을 찾을 수 없습니다. 경로: {portfolio_file}")
 
     vol_multiplier = get_weighted_volume_multiplier()
     s_cands, a_cands, port_res = [], [], []
 
-    # 2. 병렬 분석 실행 (중복 분석 방지를 위한 구조 최적화)
+    # 2. 병렬 분석 실행
     with ThreadPoolExecutor(max_workers=10) as executor:
         tasks = []
         
-        # 내 보유 종목 (portfolio.txt) - 삼성전자 등
         for c in my_codes:
             m = krx[krx['Code'] == c]
             if not m.empty:
                 tasks.append(executor.submit(analyze_stock, c, m.iloc[0]['Name'], m.iloc[0].get('Sector', '기타'), vol_multiplier, True))
         
-        # 시장 전체 후보군 (중복 제거)
         for _, r in robust.iterrows():
             if r['Code'] not in my_codes:
                 tasks.append(executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), vol_multiplier, False))
@@ -198,7 +203,7 @@ def main():
             elif res['grade'] == 'A': 
                 a_cands.append(res)
 
-    # 3. 데이터 정렬 (거래량 배수 기준)
+    # 3. 데이터 정렬
     s_sorted = sorted(s_cands, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_sorted[:5]
     final_a = sorted(s_sorted[5:] + a_cands, key=lambda x: x['vol_ratio'], reverse=True)[:10]
@@ -213,7 +218,6 @@ def main():
     msg += f"📊 분석 기준: KST {get_now_kst().strftime('%H:%M')}\n\n"
     
     msg += "📁 **내 보유 종목 대응**\n"
-    # 포트폴리오 리스트 출력
     if port_res:
         msg += "\n".join([f"- {r['name']}: {r['action']} (RSI:{r['rsi']:.1f})" for r in port_res])
     else:
