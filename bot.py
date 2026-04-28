@@ -8,17 +8,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- [전역 설정 및 유틸리티] ---
 
-# 1. KST 시간 헬퍼 (개선: 전역 관리)
+# 1. KST 시간 헬퍼
 def get_now_kst():
     """항상 한국 표준시(KST)를 반환"""
     return datetime.now() + timedelta(hours=9)
 
-# 2. 로깅 설정 (v5.5 버전의 상세 설정 복원)
+# 2. 로깅 설정 (v5.5의 상세 로깅 인프라 복원)
 logger = logging.getLogger("StockAnalyzer")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-    # 파일 저장 기능 복원
+    # 파일 로그와 터미널 로그 이중화 유지
     file_handler = logging.FileHandler('stock_analyzer.log', encoding='utf-8')
     file_handler.setFormatter(formatter)
     stream_handler = logging.StreamHandler()
@@ -26,7 +26,7 @@ if not logger.handlers:
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
 
-# 3. 텔레그램 전송 (v5.5 모듈 유지)
+# 3. 텔레그램 전송 모듈
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
@@ -46,7 +46,7 @@ def send_telegram_report(message):
 # --- [데이터 분석 엔진] ---
 
 def get_weighted_volume_multiplier():
-    """U자형 거래량 곡선 반영 보정 계수 (v5.5 유지)"""
+    """장중 시간대별 거래량 보정 계수 (U자 곡선 반영)"""
     now = get_now_kst()
     if now.weekday() >= 5: return 1.0
     start_market = 9 * 60
@@ -60,7 +60,7 @@ def get_weighted_volume_multiplier():
     return 1.0 / weight
 
 def calculate_rsi_wilder(series, period=14):
-    """Wilder's Smoothing 방식 RSI"""
+    """Wilder's Smoothing 방식 RSI (표준 지표)"""
     delta = series.diff()
     up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
     roll_up = up.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
@@ -69,14 +69,14 @@ def calculate_rsi_wilder(series, period=14):
     return (100.0 - (100.0 / (1.0 + rs))).iloc[-1]
 
 def get_indicators(df, multiplier=1.0):
-    """지표 계산 (RSI, MA, 거래량비, 거래대금)"""
+    """주요 기술적 지표 계산 (RSI, MA, 거래량비, 거래대금)"""
     if len(df) < 20: return None
     last_row = df.iloc[-1]
     curr_p = last_row['Close']
     ma10 = df['Close'].rolling(10).mean().iloc[-1]
     ma20 = df['Close'].rolling(20).mean().iloc[-1]
     ma60 = df['Close'].rolling(60).mean().iloc[-1]
-    vol_ma5 = df['Volume'].iloc[:-1].rolling(5).mean().iloc[-1]
+    vol_ma5 = df['Volume'].iloc[:-1].rolling(5).mean().iloc[-1] 
     est_vol = last_row['Volume'] * multiplier
     v_ratio = est_vol / vol_ma5 if vol_ma5 > 0 else 0
     amt_억 = (curr_p * est_vol) / 100_000_000
@@ -85,17 +85,22 @@ def get_indicators(df, multiplier=1.0):
     return {'price': curr_p, 'ma10': ma10, 'ma20': ma20, 'ma60': ma60, 'rsi': rsi_v, 'vol_ratio': v_ratio, 'amount': amt_억}
 
 def check_grade(ind):
-    """등급 판정 로직 (S/A급)"""
+    """종목 등급 판정 로직 (S/A급)"""
     if not ind: return None
+    
+    # S급: 추세 폭발 초기 (RSI 45~62, 거래대금 50억+, 거래량 1.5배+, 정배열)
     is_s = (ind['price'] > ind['ma10'] > ind['ma20'] > ind['ma60']) and \
            (ind['amount'] >= 50) and (45 <= ind['rsi'] <= 62) and (ind['vol_ratio'] >= 1.5)
     if is_s: return 'S'
+    
+    # A급: 안정적 추세 안착 (RSI 50~70, 단기 이평선 위, 거래량 1.0배+)
     is_a = (ind['price'] > ind['ma10']) and (50 <= ind['rsi'] < 70) and (ind['vol_ratio'] >= 1.0)
     if is_a: return 'A'
+    
     return None
 
 def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
-    """종목 분석 및 v5.6 신규 상태 진단 로직 적용"""
+    """종목 분석 및 v5.6 5단계 포트폴리오 진단 엔진"""
     try:
         today_date = get_now_kst().date()
         df = fdr.DataReader(symbol, (get_now_kst() - timedelta(days=120)).strftime('%Y-%m-%d'))
@@ -109,29 +114,33 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
             current_mult = multiplier if (is_today and i == 0) else 1.0
             
             ind = get_indicators(target_df, current_mult)
+            if not ind: continue # 지표 계산 실패 시 다음 일자로
+            
             grade = check_grade(ind)
             
             if i == 0:
+                # 당일 분석 데이터 생성
                 today_res = {'name': name, 'symbol': symbol, 'sector': sector, 'is_portfolio': is_portfolio,
                               'rsi': ind['rsi'], 'vol_ratio': ind['vol_ratio'], 'amount': ind['amount'],
                               'grade': grade, 'action': ""}
                 
-                # --- [v5.6: 내 보유 종목 전용 5단계 대응 신호] ---
+                # --- [v5.6: 내 보유 종목 전용 대응 시그널] ---
                 if is_portfolio:
                     if ind['price'] < ind['ma10'] and grade is None:
-                        today_res['action'] = "🚨 **탈출 고려 (추세 이탈)**"
+                        today_res['action'] = "🚨 **탈출 고려**"
                     elif ind['rsi'] >= 70:
-                        today_res['action'] = "🛑 **탈출 권고 (과열 구간)**"
+                        today_res['action'] = "🛑 **탈출 권고**"
                     elif ind['rsi'] < 50 and grade is not None:
-                        today_res['action'] = "✅ **추매 고려 (에너지 응축)**"
+                        today_res['action'] = "✅ **추매 고려**"
                     elif grade is not None and ind['price'] >= ind['ma10']:
-                        today_res['action'] = "💎 **보유 유지 (추세 있음)**"
+                        today_res['action'] = "💎 **보유 유지**"
                     else:
-                        today_res['action'] = "🧐 **관찰 필요 (기세 약화)**"
+                        today_res['action'] = "🧐 **관찰 필요**"
                 
+                # 포트폴리오 종목이 아니면서 등급도 없으면 즉시 종료 (속도 최적화)
                 if not is_portfolio and grade is None: return None
                 if grade: consistency_count = 1
-                else: break
+                else: break 
             else:
                 if grade: consistency_count += 1
                 else: break
@@ -139,54 +148,62 @@ def analyze_stock(symbol, name, sector, multiplier, is_portfolio=False):
         if today_res: today_res['consistency'] = consistency_count
         return today_res
     except Exception as e:
-        logger.error(f"오류 ({name}): {e}")
+        logger.error(f"오류 ({name} - {symbol}): {e}")
         return None
 
 # --- [메인 실행부] ---
 
 def main():
-    logger.info("Smart Picking v5.6 분석 시작")
+    logger.info("Smart Picking v5.6 Professional 분석 시작")
     
-    # 1. 대상 종목 및 포트폴리오 준비 (zfill 6자리 정렬 복원)
+    # 1. 대상 종목 및 portfolio.txt 로드 (BOM 및 공백 제거 정규화)
     krx = fdr.StockListing('KRX')
-    robust = krx[krx['Marcap'] >= 500_000_000_000] 
+    robust = krx[krx['Marcap'] >= 500_000_000_000] # 시총 5천억 이상 우량주
     
     my_codes = []
     if os.path.exists('portfolio.txt'):
-        with open('portfolio.txt', 'r', encoding='utf-8') as f:
+        # utf-8-sig로 인코딩 문제 방지, zfill(6)으로 005930 형태 강제
+        with open('portfolio.txt', 'r', encoding='utf-8-sig') as f:
             my_codes = [line.strip().zfill(6) for line in f if line.strip() and not line.startswith('#')]
+        logger.info(f"포트폴리오 종목 로드 완료: {len(my_codes)}개")
+    else:
+        logger.warning("portfolio.txt 파일을 찾을 수 없습니다.")
 
     vol_multiplier = get_weighted_volume_multiplier()
     s_cands, a_cands, port_res = [], [], []
 
-    # 2. 병렬 분석 실행 (중복 충돌 방지를 위해 포트폴리오 우선 분리)
+    # 2. 병렬 분석 실행 (중복 분석 방지를 위한 구조 최적화)
     with ThreadPoolExecutor(max_workers=10) as executor:
-        # 내 보유 종목 먼저 분석
-        port_tasks = []
+        tasks = []
+        
+        # 내 보유 종목 (portfolio.txt) - 삼성전자 등
         for c in my_codes:
             m = krx[krx['Code'] == c]
             if not m.empty:
-                port_tasks.append(executor.submit(analyze_stock, c, m.iloc[0]['Name'], m.iloc[0].get('Sector', '기타'), vol_multiplier, True))
+                tasks.append(executor.submit(analyze_stock, c, m.iloc[0]['Name'], m.iloc[0].get('Sector', '기타'), vol_multiplier, True))
         
-        for f in as_completed(port_tasks):
-            res = f.result()
-            if res: port_res.append(res)
-
-        # 시장 전체 분석 (이미 분석한 내 종목은 제외)
-        market_tasks = [executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), vol_multiplier, False) for _, r in robust.iterrows() if r['Code'] not in my_codes]
+        # 시장 전체 후보군 (중복 제거)
+        for _, r in robust.iterrows():
+            if r['Code'] not in my_codes:
+                tasks.append(executor.submit(analyze_stock, r['Code'], r['Name'], r.get('Sector', '기타'), vol_multiplier, False))
         
-        for f in as_completed(market_tasks):
+        for f in as_completed(tasks):
             res = f.result()
             if not res: continue
-            if res['grade'] == 'S': s_cands.append(res)
-            elif res['grade'] == 'A': a_cands.append(res)
+            
+            if res['is_portfolio']: 
+                port_res.append(res)
+            elif res['grade'] == 'S': 
+                s_cands.append(res)
+            elif res['grade'] == 'A': 
+                a_cands.append(res)
 
-    # 3. 리포트 데이터 정렬
+    # 3. 데이터 정렬 (거래량 배수 기준)
     s_sorted = sorted(s_cands, key=lambda x: x['vol_ratio'], reverse=True)
     final_s = s_sorted[:5]
     final_a = sorted(s_sorted[5:] + a_cands, key=lambda x: x['vol_ratio'], reverse=True)[:10]
 
-    # 4. 메시지 조립 및 전송
+    # 4. 리포트 메시지 조립
     def get_badge(c):
         if c >= 3: return "🔥 **[3일 연속 우수]**"
         if c == 2: return "✅ **[2일 연속 우수]**"
@@ -196,7 +213,11 @@ def main():
     msg += f"📊 분석 기준: KST {get_now_kst().strftime('%H:%M')}\n\n"
     
     msg += "📁 **내 보유 종목 대응**\n"
-    msg += "\n".join([f"- {r['name']}: {r['action']} (RSI:{r['rsi']:.1f})" for r in port_res]) if port_res else "- 없음"
+    # 포트폴리오 리스트 출력
+    if port_res:
+        msg += "\n".join([f"- {r['name']}: {r['action']} (RSI:{r['rsi']:.1f})" for r in port_res])
+    else:
+        msg += "- 없음"
     msg += "\n\n"
 
     msg += "💎 **S급: 추세 폭발 우량주 (Max 5)**\n"
@@ -207,6 +228,7 @@ def main():
     msg += "\n".join([f"- {r['name']}: (RSI:{r['rsi']:.1f}, {r['vol_ratio']:.1f}배) {get_badge(r['consistency'])}" for r in final_a]) if final_a else "- 없음"
 
     send_telegram_report(msg)
+    logger.info("분석 리포트 전송 완료")
 
 if __name__ == "__main__":
     main()
