@@ -4,12 +4,12 @@ import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-# --- [v6.0 설정값: 안정성 중심] ---
+# --- [v6.1 설정값] ---
 START_DATE = '2024-01-01' 
 END_DATE = '2026-04-30'
 INITIAL_CASH = 10_000_000
 MAX_POSITIONS = 5
-FEE = 0.002 # 수수료 0.2%
+FEE = 0.002 
 
 def calculate_rsi_wilder(series, period=14):
     delta = series.diff()
@@ -33,13 +33,13 @@ def get_stock_data(symbol):
     except: return None
 
 def run_backtest():
-    print(f"🚀 v6.0 안정성 강화 백테스트: {START_DATE} ~ {END_DATE}")
+    print(f"🚀 v6.1 버그 수정 및 안정성 강화 백테스트: {START_DATE} ~ {END_DATE}")
     
     kospi = fdr.DataReader('KS11', START_DATE, END_DATE)
     kospi['MA20'] = kospi['Close'].rolling(20).mean()
     
     krx = fdr.StockListing('KRX')
-    top_stocks = krx.nlargest(250, 'Marcap')['Code'].tolist() # 유니버스 확대
+    top_stocks = krx.nlargest(250, 'Marcap')['Code'].tolist()
 
     all_data = {}
     with ThreadPoolExecutor(max_workers=20) as executor:
@@ -48,7 +48,7 @@ def run_backtest():
             if data is not None: all_data[code] = data
 
     cash = INITIAL_CASH
-    positions = {} # {symbol: {'qty': n, 'entry_price': p, 'max_p': p}}
+    positions = {} 
     trade_log, history = [], []
     trading_days = kospi.index
 
@@ -56,22 +56,24 @@ def run_backtest():
         today = trading_days[i]
         tomorrow = trading_days[i+1]
         
-        # [매도 로직]
+        # [수정 포인트] 시장 상황을 모든 매매 로직 시작 전에 정의
+        market_stable = kospi.loc[today]['Close'] > kospi.loc[today]['MA20']
+        
+        # [1. 매도 로직]
         to_sell = []
         for symbol, pos in positions.items():
             df = all_data[symbol]
             if today not in df.index: continue
             curr = df.loc[today]
             
-            # 1. 가변 손절 (여유 버퍼 3% 추가)
-            market_stable = kospi.loc[today]['Close'] > kospi.loc[today]['MA20']
+            # 가변 손절 (3% 버퍼)
             stop_line = curr['MA20'] * 0.97 if market_stable else curr['MA10'] * 0.98
             
-            # 2. 트레일링 스탑 (수익이 10% 이상 났을 때만 15% 적용)
+            # 트레일링 스탑 (수익 10% 이상 시 15% 적용)
             profit_pct = (curr['Close'] / pos['entry_price'] - 1) * 100
             is_trailing_hit = False
             if profit_pct > 10:
-                if curr['Close'] < (curr['Peak'] * 0.85): # 여유 있게 15%
+                if curr['Close'] < (curr['Peak'] * 0.85): 
                     is_trailing_hit = True
             
             if curr['Close'] < stop_line or is_trailing_hit:
@@ -81,24 +83,23 @@ def run_backtest():
                 to_sell.append(symbol)
         for s in to_sell: del positions[s]
 
-        # [매수 로직]
+        # [2. 매수 로직]
         if len(positions) < MAX_POSITIONS:
             candidates = []
             for symbol, df in all_data.items():
                 if symbol not in positions and today in df.index:
                     row = df.loc[today]
-                    if row['Amount'] < 150: continue # 필터 현실화
+                    if row['Amount'] < 150: continue 
                     
-                    # S급 조건 (강세장 돌파 / 횡보장 눌림목)
-                    if market_stable:
+                    if market_stable: # 강세장 돌파
                         if (row['Close'] > row['MA10'] > row['MA20']) and (45 <= row['RSI'] <= 70):
                             candidates.append((symbol, row['Vol_Ratio']))
-                    else:
+                    else: # 횡보장 눌림목
                         if (row['Close'] > row['MA60']) and (35 <= row['RSI'] <= 48):
                             candidates.append((symbol, row['Vol_Ratio']))
             
             candidates.sort(key=lambda x: x[1], reverse=True)
-            for symbol, _ in candidates[:MAX_POSITIONS]:
+            for symbol, _ in candidates:
                 if len(positions) >= MAX_POSITIONS: break
                 df = all_data[symbol]
                 if tomorrow in df.index:
@@ -109,13 +110,21 @@ def run_backtest():
                         positions[symbol] = {'qty': qty, 'entry_price': buy_price}
                         cash -= (qty * buy_price) * (1 + FEE)
 
-        total_val = cash + sum([all_data[s].loc[today]['Close'] * p['qty'] for s, p in positions.items() if today in all_data[s].index])
+        # [3. 자산 기록]
+        total_val = cash
+        for symbol, pos in positions.items():
+            if today in all_data[symbol].index:
+                total_val += all_data[symbol].loc[today]['Close'] * pos['qty']
+            else:
+                total_val += pos['entry_price'] * pos['qty']
         history.append(total_val)
 
-    # 결과 리포트
+    # 최종 결과 출력
     final_return = ((history[-1]/INITIAL_CASH)-1)*100
     mdd = ((pd.Series(history) - pd.Series(history).cummax()) / pd.Series(history).cummax()).min() * 100
-    print(f"💰 최종 수익률: {final_return:.2f}% | 승률: {(len([r for r in trade_log if r > 0])/len(trade_log)*100):.2f}% | MDD: {mdd:.2f}%")
+    win_rate = (len([r for r in trade_log if r > 0]) / len(trade_log) * 100) if trade_log else 0
+    print(f"\n✨ v6.1 최종 성적표")
+    print(f"💰 수익률: {final_return:.2f}% | 승률: {win_rate:.2f}% | MDD: {mdd:.2f}% | 매매: {len(trade_log)}회")
 
 if __name__ == "__main__":
     run_backtest()
