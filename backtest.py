@@ -8,8 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 INITIAL_CASH = 10_000_000
 MAX_POSITIONS = 5
 FEE = 0.002
-START_DATE = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-END_DATE = datetime.now().strftime('%Y-%m-%d')
+# --- [설정값 수정] ---
+START_DATE = '2024-01-01'  # 테스트 시작일
+END_DATE = '2025-01-01'    # 테스트 종료일 (25년 초)
 
 def calculate_rsi_wilder(series, period=14):
     delta = series.diff()
