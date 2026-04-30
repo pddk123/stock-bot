@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- [v6.2 백테스트 설정] ---
 START_DATE = '2024-01-01' 
-END_DATE = '2026-04-30'
+END_DATE = '2025-01-01'
 INITIAL_CASH = 10_000_000
 MAX_POSITIONS = 5
 FEE = 0.002
