@@ -9,8 +9,8 @@ INITIAL_CASH = 10_000_000
 MAX_POSITIONS = 5
 FEE = 0.002
 # 날짜를 직접 수정해서 테스트해보세요 (예: '2024-01-01' ~ '2025-01-01')
-START_DATE = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-END_DATE = datetime.now().strftime('%Y-%m-%d')
+START_DATE = (datetime.now() - timedelta(days=365)).strftime('2024-01-01')
+END_DATE = datetime.now().strftime('2025-01-01')
 
 def calculate_rsi_wilder(series, period=14):
     delta = series.diff()
