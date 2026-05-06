@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # --- [v6.3.1 주도주 집중 모드] ---
-START_DATE = '2024-01-01' 
-END_DATE = '2025-01-01'
+START_DATE = '2025-01-01' 
+END_DATE = '2026-01-01'
 INITIAL_CASH = 10_000_000 # 1,000만 원 세팅
 MAX_POSITIONS = 5
 FEE = 0.002
