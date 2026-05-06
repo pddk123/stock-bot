@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 # --- [v6.4 설정값] ---
 START_DATE = '2024-01-01' 
 END_DATE = '2025-01-01'
-INITIAL_CASH = 30_000_000 # 테스트 시작 금액 3천만 원
+INITIAL_CASH = 10_000_000 # 테스트 시작 금액 3천만 원
 FEE = 0.002
 TARGET_PROFIT = 0.07 
 STOP_LOSS = -0.10     # 지수 주의 국면 시 적용
