@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # --- [v8.1 설정값: 슬로우 스윙 모드] ---
-START_DATE = '2024-01-01' 
-END_DATE = '2025-01-01'
+START_DATE = '2025-01-01' 
+END_DATE = '2026-01-01'
 INITIAL_CASH = 10_000_000 
 MAX_POSITIONS = 5
 FEE = 0.002             # 수수료 + 세금 (0.2%)
