@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # --- [v6.5 설정값: 맷집 모드] ---
-START_DATE = '2024-01-01' 
-END_DATE = '2025-01-01'
+START_DATE = '2023-01-01' 
+END_DATE = '2024-01-01'
 INITIAL_CASH = 10_000_000 
 FEE = 0.002
 TARGET_PROFIT = 0.07       # 7% 익절 (유지)
