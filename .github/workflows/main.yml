@@ -2,14 +2,20 @@ name: Daily Stock Analysis
 
 on:
   schedule:
+    # 월~금 한국시간 오전 9시 49분 실행 (UTC 00:49)
     - cron: '49 00 * * 1-5'
-  workflow_dispatch:
+  workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 저장소 쓰기 권한 설정 (파일 업데이트를 위해 필수)
+    permissions:
+      contents: write
+      
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,3 +32,16 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot.py
+
+      - name: Commit and Push changes
+        run: |
+          # Git 사용자 설정
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # 변경된 포트폴리오 파일 스테이징
+          git add my_portfolio.csv
+          
+          # 변경사항이 있는 경우에만 커밋 및 푸시 수행
+          # [skip ci]는 자동 커밋으로 인한 워크플로우 무한 반복을 방지합니다.
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update portfolio data [skip ci]" && git push)
