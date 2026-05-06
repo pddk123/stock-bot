@@ -5,15 +5,15 @@ import math
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-# --- [v6.4 설정값] ---
+# --- [v6.5 설정값: 맷집 모드] ---
 START_DATE = '2024-01-01' 
 END_DATE = '2025-01-01'
-INITIAL_CASH = 10_000_000 # 테스트 시작 금액 1천만 원
+INITIAL_CASH = 10_000_000 
 FEE = 0.002
-TARGET_PROFIT = 0.07 
-STOP_LOSS = -0.10     # 지수 주의 국면 시 적용
-TIME_CUT_DAYS = 30   
-MAX_PER_STOCK = 10_000_000 # 한 종목 최대 1,000만 원
+TARGET_PROFIT = 0.07       # 7% 익절 (유지)
+STOP_LOSS = -0.17          # 손절선을 -17%로 하향 (둔감화)
+TIME_CUT_DAYS = 30         # 30일 타임컷 (유지)
+MAX_PER_STOCK = 10_000_000 
 
 def calculate_rsi_wilder(series, period=14):
     delta = series.diff()
@@ -33,7 +33,7 @@ def get_stock_data(symbol):
     except: return None
 
 def run_backtest():
-    print(f"🚀 v6.4 (Dynamic Allocation & Conditional Stop) 백테스트: {START_DATE} ~ {END_DATE}")
+    print(f"🚀 v6.5 (맷집 모드) 백테스트 실행: {START_DATE} ~ {END_DATE}")
     kospi = fdr.DataReader('KS11', START_DATE, END_DATE)
     kospi['MA20'] = kospi['Close'].rolling(20).mean()
     top_stocks = fdr.StockListing('KRX').nlargest(250, 'Marcap')['Code'].tolist()
@@ -50,8 +50,10 @@ def run_backtest():
     for i in range(len(trading_days) - 1):
         today = trading_days[i]; tomorrow = trading_days[i+1]
         
-        # 지수 상황 판단
-        market_stable = kospi.loc[today]['Close'] > kospi.loc[today]['MA20']
+        # 지수 상황: 단순히 MA20 아래가 아니라, MA20보다 3% 이상 밀려야 '위험'으로 판단
+        k_price = kospi.loc[today]['Close']
+        k_ma20 = kospi.loc[today]['MA20']
+        market_danger = k_price < (k_ma20 * 0.97) if not pd.isna(k_ma20) else False
         
         # [1] 매도 로직
         to_sell = []
@@ -63,11 +65,11 @@ def run_backtest():
             profit_rate = (curr_price / pos['entry_price']) - 1
             hold_days = (today - pos['entry_date']).days
             
-            # 조건부 손절 활성화
             sell_trigger = False
             if profit_rate >= TARGET_PROFIT: sell_trigger = True # 익절
-            elif hold_days >= TIME_CUT_DAYS: sell_trigger = True # 타임컷
-            elif not market_stable and profit_rate <= STOP_LOSS: sell_trigger = True # 하락장 손절
+            elif hold_days >= TIME_CUT_DAYS: sell_trigger = True # 한 달 타임컷
+            # 맷집 모드: 정말 시장이 위험하고(-3% 이탈), 내 종목이 -17% 박살 났을 때만 손절
+            elif market_danger and profit_rate <= STOP_LOSS: sell_trigger = True 
             
             if sell_trigger:
                 sell_price = df.loc[tomorrow]['Open'] if tomorrow in df.index else curr_price
@@ -76,10 +78,8 @@ def run_backtest():
                 to_sell.append(symbol)
         for s in to_sell: del positions[s]
 
-        # [2] 동적 포지션 계산 (PM's Logic)
+        # [2] 동적 자본 배분
         current_total_val = cash + sum([all_data[s].loc[today]['Close'] * p['qty'] for s, p in positions.items() if today in all_data[s].index])
-        
-        # 분할 개수 결정: 3천 이하는 3개, 그 이상은 1천만 원당 1개씩 추가
         num_splits = max(3, math.ceil(current_total_val / 10_000_000))
         buy_unit = min(MAX_PER_STOCK, current_total_val / num_splits)
 
@@ -90,25 +90,26 @@ def run_backtest():
                 if symbol not in positions and today in df.index:
                     row = df.loc[today]
                     if row['Amount'] < 300: continue
-                    grade = 'S' if (row['Close'] > row['MA10'] > row['MA20']) and (45 <= row['RSI'] <= 72) else None
-                    if grade: candidates.append((symbol, row['Vol_Ratio']))
+                    if (row['Close'] > row['MA10'] > row['MA20']) and (45 <= row['RSI'] <= 72):
+                        candidates.append((symbol, row['Vol_Ratio']))
             
             candidates.sort(key=lambda x: x[1], reverse=True)
             for symbol, _ in candidates[:2]:
                 if len(positions) >= num_splits or cash < buy_unit: break
                 df = all_data[symbol]
-                buy_price = df.loc[tomorrow]['Open']
-                qty = (buy_unit * (1 - FEE)) // buy_price
-                if qty > 0:
-                    positions[symbol] = {'qty': qty, 'entry_price': buy_price, 'entry_date': today}
-                    cash -= (qty * buy_price) * (1 + FEE)
+                if tomorrow in df.index:
+                    buy_price = df.loc[tomorrow]['Open']
+                    qty = (buy_unit * (1 - FEE)) // buy_price
+                    if qty > 0:
+                        positions[symbol] = {'qty': qty, 'entry_price': buy_price, 'entry_date': today}
+                        cash -= (qty * buy_price) * (1 + FEE)
 
         history.append(current_total_val)
 
     # 결과 리포트
     final_return = ((history[-1]/INITIAL_CASH)-1)*100
     mdd = ((pd.Series(history) - pd.Series(history).cummax()) / pd.Series(history).cummax()).min() * 100
-    print(f"\n🛡️ v6.4 세이프 스나이퍼 성적표")
+    print(f"\n💪 v6.5 맷집 모드 성적표")
     print(f"💰 최종 자산: {history[-1]:,.0f}원 (수익률: {final_return:.2f}%)")
     print(f"🎯 승률: {(len([r for r in trade_log if r > 0])/len(trade_log)*100):.2f}% | MDD: {mdd:.2f}% | 매매: {len(trade_log)}회")
 
