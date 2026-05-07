@@ -18,6 +18,12 @@ TIME_CUT_DAYS = 15
 MOMENTUM_THRESHOLD = 0.03
 RSI_OVERHEAT = 75
 
+# [필터링 설정] 
+# 1. 수동 블랙리스트: 숫자가 좋아도 사기 싫은 종목 코드를 넣으세요 (예: 파두 '440110')
+MANUAL_BLACKLIST = ['440110'] 
+# 2. 자동 차단 키워드: 아래 단어가 상태창에 하나라도 있으면 즉시 제외합니다.
+DANGER_PATTERN = '경고|위험|관리|정지|과열|주의'
+
 def send_telegram_report(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -56,24 +62,20 @@ def sync_portfolio(df):
 def run_bot():
     if not os.path.exists(PORTFOLIO_FILE): return
     
-    # 1. KRX 목록 가져오기 및 '초강력' 안전 필터링
+    # 1. 실시간 KRX 데이터 및 안전 필터링
     krx = fdr.StockListing('KRX')
     
-    # [핵심 수정] 단어 하나라도 포함되면 즉시 탈락 (str.contains 활용)
-    # 경고, 위험, 관리, 정지, 과열, 주의 등 위험 징조를 모두 포함
-    danger_pattern = '경고|위험|관리|정지|과열|주의'
-    
-    # 컬럼명이 'State' 또는 '상태'인 경우 모두 대응
-    state_col = 'State' if 'State' in krx.columns else '상태' if '상태' in krx.columns else None
-    
+    # [자동 필터] 상태 컬럼(State)에서 위험 키워드 제거 + 수동 블랙리스트 제거
+    state_col = next((c for c in krx.columns if c in ['State', '상태']), None)
     if state_col:
-        # NaN 값 처리 후 패턴 매칭 (패턴이 포함되지 않은 종목만 남김)
-        safe_krx = krx[~krx[state_col].fillna('').str.contains(danger_pattern)].copy()
+        safe_krx = krx[~krx[state_col].fillna('').str.contains(DANGER_PATTERN)].copy()
     else:
         safe_krx = krx.copy()
-    
+        
+    safe_krx = safe_krx[~safe_krx['Code'].isin(MANUAL_BLACKLIST)]
     name_map = dict(zip(safe_krx['Code'], safe_krx['Name']))
     
+    # 2. 포트폴리오 로드
     all_data = pd.read_csv(PORTFOLIO_FILE, dtype={'code': str})
     cash_mask = all_data['code'].str.upper() == 'CASH'
     cash_row = all_data[cash_mask]
@@ -82,20 +84,22 @@ def run_bot():
     portfolio = sync_portfolio(portfolio)
     current_cash = cash_row['qty'].iloc[0] if not cash_row.empty else 0
 
+    # 3. 시장 상황 판단
     kospi = fdr.DataReader('KS11', (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
     market_alive = kospi['Close'].iloc[-1] > kospi['Close'].rolling(20).mean().iloc[-1]
     idx_ret = (kospi['Close'].iloc[-1] / kospi['Close'].iloc[-21]) - 1
     
-    report = f"🛡️ *Smart Picking v8.3 (Safe Mode v2)*\n\n"
+    report = f"🛡️ *Smart Picking v8.3 (Full-Auto Safe Mode)*\n\n"
     report += f"1) 시장 지수 : {'✅ 매수 가능' if market_alive else '⚠️ 관망'}\n"
     report += f"- 지수 모멘텀: {idx_ret:.2%} | 현금: {current_cash:,.0f}원\n\n"
 
+    # 4. 보유 종목 리포트
     report += f"2) 보유 종목 리포트\n━━━━━━━━━━━━\n"
     if portfolio.empty: report += "- 보유 종목 없음\n"
     else:
         for idx, row in portfolio.iterrows():
             curr = get_live_data(row['code'])
-            p_name = name_map.get(row['code'], row['code'])
+            p_name = name_map.get(row['code'], row['code']) or row['code']
             profit = (curr['Close'] / row['entry_price']) - 1
             
             atr_val = row['entry_atr'] if not pd.isna(row['entry_atr']) else 0
@@ -111,7 +115,8 @@ def run_bot():
             report += f"- 제안: *{signal}* (손절가: {stop:,.0f})\n"
             report += f"----------------------------\n"
 
-    report += f"\n3) 안전 종목 추천 (경고/위험/과열 완전 제외)\n━━━━━━━━━━━━\n"
+    # 5. 신규 안전 종목 추천
+    report += f"\n3) 안전 종목 추천 (경고/블랙리스트 제외)\n━━━━━━━━━━━━\n"
     empty_slots = MAX_POSITIONS - len(portfolio)
     if not market_alive or empty_slots <= 0:
         report += "- 신규 매수 조건 미충족\n"
@@ -130,6 +135,7 @@ def run_bot():
         for cand in candidates[:5]:
             report += f"✅ *{name_map.get(cand['code'])}*\n- 모멘텀: {cand['mom']:.2%} | *매수금: {buy_unit:,.0f}원*\n"
 
+    # 6. 저장 및 보고
     final_df = pd.concat([portfolio, cash_row])
     final_df.to_csv(PORTFOLIO_FILE, index=False)
     
