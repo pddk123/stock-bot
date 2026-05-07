@@ -46,7 +46,6 @@ def sync_portfolio(df):
                 tr = pd.concat([hist['High']-hist['Low'], abs(hist['High']-hist['Close'].shift()), abs(hist['Low']-hist['Close'].shift())], axis=1).max(axis=1)
                 df.at[index, 'entry_atr'] = tr.rolling(14).mean().iloc[-1]
             except: pass
-        
         try:
             curr_price = fdr.DataReader(row['code']).iloc[-1]['Close']
             curr_profit = (curr_price / row['entry_price']) - 1
@@ -57,16 +56,20 @@ def sync_portfolio(df):
 def run_bot():
     if not os.path.exists(PORTFOLIO_FILE): return
     
-    # [업그레이드] KRX 목록 가져오기 및 '안전' 필터링
+    # 1. KRX 목록 가져오기 및 '초강력' 안전 필터링
     krx = fdr.StockListing('KRX')
     
-    # 투자경고, 투자위험, 관리종목, 거래정지 등 위험 종목 제외 로직
-    # FinanceDataReader의 'State' 컬럼을 활용합니다.
-    forbidden_states = ['투자경고', '투자위험', '관리종목', '거래정지', '단기과열']
-    if 'State' in krx.columns:
-        safe_krx = krx[~krx['State'].isin(forbidden_states)].copy()
+    # [핵심 수정] 단어 하나라도 포함되면 즉시 탈락 (str.contains 활용)
+    # 경고, 위험, 관리, 정지, 과열, 주의 등 위험 징조를 모두 포함
+    danger_pattern = '경고|위험|관리|정지|과열|주의'
+    
+    # 컬럼명이 'State' 또는 '상태'인 경우 모두 대응
+    state_col = 'State' if 'State' in krx.columns else '상태' if '상태' in krx.columns else None
+    
+    if state_col:
+        # NaN 값 처리 후 패턴 매칭 (패턴이 포함되지 않은 종목만 남김)
+        safe_krx = krx[~krx[state_col].fillna('').str.contains(danger_pattern)].copy()
     else:
-        # 컬럼명이 다른 경우를 대비한 유연한 필터링
         safe_krx = krx.copy()
     
     name_map = dict(zip(safe_krx['Code'], safe_krx['Name']))
@@ -83,7 +86,7 @@ def run_bot():
     market_alive = kospi['Close'].iloc[-1] > kospi['Close'].rolling(20).mean().iloc[-1]
     idx_ret = (kospi['Close'].iloc[-1] / kospi['Close'].iloc[-21]) - 1
     
-    report = f"🛡️ *Smart Picking v8.3 (Safe Mode)*\n\n"
+    report = f"🛡️ *Smart Picking v8.3 (Safe Mode v2)*\n\n"
     report += f"1) 시장 지수 : {'✅ 매수 가능' if market_alive else '⚠️ 관망'}\n"
     report += f"- 지수 모멘텀: {idx_ret:.2%} | 현금: {current_cash:,.0f}원\n\n"
 
@@ -108,12 +111,11 @@ def run_bot():
             report += f"- 제안: *{signal}* (손절가: {stop:,.0f})\n"
             report += f"----------------------------\n"
 
-    report += f"\n3) 안전 종목 추천 (경고 종목 제외)\n━━━━━━━━━━━━\n"
+    report += f"\n3) 안전 종목 추천 (경고/위험/과열 완전 제외)\n━━━━━━━━━━━━\n"
     empty_slots = MAX_POSITIONS - len(portfolio)
     if not market_alive or empty_slots <= 0:
         report += "- 신규 매수 조건 미충족\n"
     else:
-        # 안전한 종목 중 시총 상위 250개 추출
         top_codes = safe_krx.nlargest(250, 'Marcap')['Code'].tolist()
         candidates = []
         with ThreadPoolExecutor(max_workers=20) as ex:
