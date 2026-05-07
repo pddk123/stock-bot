@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # --- [v8.8 백테스트 설정값] ---
-START_DATE = '2024-01-01'
-END_DATE = '2025-01-01'
+START_DATE = '2025-01-01'
+END_DATE = '2026-01-01'
 INITIAL_CASH = 10_000_000
 MAX_POSITIONS = 5
 TARGET_PROFIT = 0.10      # 10% 익절
