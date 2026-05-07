@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-# --- [Settings] ---
+# --- [Settings & Constants] ---
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 PORTFOLIO_FILE = 'my_portfolio.csv'
@@ -29,7 +29,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- [Helper Functions] ---
 
 def send_telegram_report(message):
-    """텔레그램 리포트 전송 및 에러 로깅"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logging.warning("텔레그램 설정이 누락되었습니다.")
         return
@@ -46,25 +45,34 @@ def calculate_atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 def get_live_data(symbol):
-    """지표 계산 및 에너지 센서 진단"""
+    """지표 계산 및 4단계 에너지 센서(v8.8) 작동"""
     try:
         df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=LOOKBACK_LONG)).strftime('%Y-%m-%d'))
         if len(df) < 60: return None
         
+        # 지표 계산
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Momentum'] = df['Close'].pct_change(20)
-        
         delta = df['Close'].diff()
         up = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
         down = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
         df['RSI'] = 100 - (100 / (1 + up/down))
         
         curr = df.iloc[-1]
-        
         prev_10d = df.iloc[-11:-1]
+        
+        # 에너지 상태 진단 로직 (4단계)
         price_high_10d = prev_10d['Close'].max()
-        rsi_at_high = prev_10d.loc[prev_10d['Close'].idxmax(), 'RSI']
-        energy = "⚠️ EXHAUSTED" if (curr['Close'] > price_high_10d and curr['RSI'] < rsi_at_high) else "✅ STABLE"
+        rsi_high_10d = prev_10d['RSI'].max()
+        
+        if curr['RSI'] > RSI_OVERHEAT:
+            energy = "🔥 OVERHEATED"
+        elif curr['Close'] > price_high_10d and curr['RSI'] > rsi_high_10d:
+            energy = "🚀 ACCELERATING"
+        elif curr['Close'] > price_high_10d and curr['RSI'] < rsi_high_10d:
+            energy = "⚠️ EXHAUSTED"
+        else:
+            energy = "✅ STABLE"
             
         return {
             'code': symbol, 'Close': curr['Close'], 'Momentum': curr['Momentum'], 
@@ -76,7 +84,6 @@ def get_live_data(symbol):
         return None
 
 def is_valid_candidate(res, portfolio_codes, idx_ret):
-    """[New] 신규 매수 후보 필터링 조건 함수화"""
     if not res: return False
     return (
         res['code'] not in portfolio_codes and
@@ -102,7 +109,7 @@ def sync_stock_with_data(row):
 # --- [Core Functions] ---
 
 def generate_report(portfolio_with_data, candidates, market_status, cash, idx_ret, name_map):
-    report = f"📊 *Smart Picking v8.7 Final*\n📅 {datetime.now().strftime('%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━\n\n"
+    report = f"📊 *Smart Picking v8.8 Hyper-Drive*\n📅 {datetime.now().strftime('%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━\n\n"
     report += f"*1. MARKET MONITOR*\n● Status: {market_status}\n● KOSPI Mom: {idx_ret:+.2%}\n● Reserves: {cash:,.0f}원\n\n"
 
     report += f"*2. CURRENT POSITIONS*\n"
