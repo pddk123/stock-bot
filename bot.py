@@ -14,11 +14,6 @@ PORTFOLIO_FILE = 'my_portfolio.csv'
 MAX_POSITIONS = 5
 TARGET_PROFIT = 0.10
 ATR_MULTIPLIER = 2.0
-TIME_CUT_DAYS = 15
-MOMENTUM_THRESHOLD = 0.03 
-RSI_OVERHEAT = 75
-
-# [매뉴얼 필터링] 숫자가 좋아도 사기 싫은 종목 코드를 여기에 추가하세요.
 BLACKLIST = ['440110'] # 파두(440110)
 
 def send_telegram_report(message):
@@ -40,34 +35,60 @@ def get_live_data(symbol):
         return df.iloc[-1]
     except: return None
 
+def sync_portfolio(df):
+    """CSV 파일에 비어있는 ATR과 max_profit을 실시간으로 동기화합니다."""
+    for index, row in df.iterrows():
+        code = row['code']
+        # 1. entry_atr이 없으면(nan) 과거 데이터를 가져와서 자동 계산
+        if pd.isna(row.get('entry_atr')) or row.get('entry_atr') == 0:
+            try:
+                hist = fdr.DataReader(code, (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
+                tr = pd.concat([hist['High']-hist['Low'], abs(hist['High']-hist['Close'].shift()), abs(hist['Low']-hist['Close'].shift())], axis=1).max(axis=1)
+                df.at[index, 'entry_atr'] = tr.rolling(14).mean().iloc[-1]
+            except: pass
+        
+        # 2. max_profit 업데이트 (본전 사수 로직용)
+        try:
+            curr_price = fdr.DataReader(code).iloc[-1]['Close']
+            curr_profit = (curr_price / row['entry_price']) - 1
+            df.at[index, 'max_profit'] = max(row.get('max_profit', 0) if not pd.isna(row.get('max_profit')) else 0, curr_profit)
+        except: pass
+    return df
+
 def run_bot():
     if not os.path.exists(PORTFOLIO_FILE): return
     
     krx = fdr.StockListing('KRX')
     name_map = dict(zip(krx['Code'], krx['Name']))
     
+    # 데이터 로드 및 자동 동기화
     all_data = pd.read_csv(PORTFOLIO_FILE, dtype={'code': str})
     cash_mask = all_data['code'].str.upper() == 'CASH'
-    current_cash = all_data[cash_mask]['qty'].iloc[0] if any(cash_mask) else 0
+    cash_row = all_data[cash_mask]
     portfolio = all_data[~cash_mask].copy()
 
+    # [핵심] 여기서 비어있는 정보들을 채우고 저장합니다.
+    portfolio = sync_portfolio(portfolio)
+    
+    # 수정한 포트폴리오 정보를 다시 합쳐서 CSV에 저장 (자동 업데이트)
+    updated_all_data = pd.concat([portfolio, cash_row])
+    updated_all_data.to_csv(PORTFOLIO_FILE, index=False)
+
+    current_cash = cash_row['qty'].iloc[0] if not cash_row.empty else 0
     kospi = fdr.DataReader('KS11', (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
     market_alive = kospi['Close'].iloc[-1] > kospi['Close'].rolling(20).mean().iloc[-1]
     idx_ret = (kospi['Close'].iloc[-1] / kospi['Close'].iloc[-21]) - 1
     
-    # --- [리포트 디자인 시작] ---
-    report = f"📊 *Smart Picking v8.3 Status*\n"
+    # --- 리포트 생성 로직 ---
+    report = f"📊 *Smart Picking v8.3 Dashboard*\n"
     report += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
     report += f"━━━━━━━━━━━━━━━━━━\n\n"
 
-    # 1) 시장 상태 지표
-    market_icon = "🔵 ACTIVE" if market_alive else "🔴 CAUTION"
     report += f"*1. MARKET MONITOR*\n"
-    report += f"● Status: {market_icon}\n"
+    report += f"● Status: {'🔵 ACTIVE' if market_alive else '🔴 CAUTION'}\n"
     report += f"● KOSPI Mom: {idx_ret:+.2%}\n"
     report += f"● Reserves: {current_cash:,.0f}원\n\n"
 
-    # 2) 보유 종목 현황 (섹션 구분 강화)
     report += f"*2. CURRENT POSITIONS*\n"
     if portfolio.empty:
         report += "└ [ - ] No Active Positions\n"
@@ -77,7 +98,7 @@ def run_bot():
             p_name = name_map.get(row['code'], row['code'])
             profit = (curr['Close'] / row['entry_price']) - 1
             
-            # 본전 사수 로직 반영된 손절가
+            # ATR이 계산되었으므로 이제 정상적으로 손절가가 출력됩니다.
             stop = max(row['entry_price'] - (ATR_MULTIPLIER * row['entry_atr']), 
                        row['entry_price'] if row['max_profit'] >= 0.03 else 0)
             
@@ -91,32 +112,28 @@ def run_bot():
             report += f"   └ Action: `{signal}` (SL: {stop:,.0f})\n"
             report += f"   ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
 
-    # 3) 추천 종목 (파두 필터링 적용)
+    # 3. 신규 추천 (파두 제외)
     report += f"\n*3. NEW OPPORTUNITIES*\n"
     empty_slots = MAX_POSITIONS - len(portfolio)
     if not market_alive or empty_slots <= 0:
         report += "└ [ - ] Conditions Not Met\n"
     else:
-        # 블랙리스트 제외 처리
         top_codes = [c for c in krx.nlargest(250, 'Marcap')['Code'].tolist() if c not in BLACKLIST]
         candidates = []
         with ThreadPoolExecutor(max_workers=20) as ex:
             results = list(ex.map(get_live_data, top_codes))
             for i, res in enumerate(results):
                 if res is not None and top_codes[i] not in portfolio['code'].values:
-                    if res['Amount'] >= 300 and res['Momentum'] > (idx_ret + MOMENTUM_THRESHOLD) and res['RSI'] < RSI_OVERHEAT:
+                    if res['Amount'] >= 300 and res['Momentum'] > (idx_ret + 0.03) and res['RSI'] < 75:
                         candidates.append({'code': top_codes[i], 'mom': res['Momentum']})
         
         candidates.sort(key=lambda x: x['mom'], reverse=True)
         buy_unit = current_cash / empty_slots
-        
         for i, cand in enumerate(candidates[:5], 1):
-            c_name = name_map.get(cand['code'], cand['code'])
-            report += f"{i}️⃣ *{c_name}* ({cand['code']})\n"
+            report += f"{i}️⃣ *{name_map.get(cand['code'])}* ({cand['code']})\n"
             report += f"   └ Mom: {cand['mom']:.1%} | Buy: {buy_unit:,.0f}원\n"
 
     report += f"\n━━━━━━━━━━━━━━━━━━"
-    
     print(report)
     send_telegram_report(report)
 
