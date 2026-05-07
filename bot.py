@@ -37,10 +37,8 @@ def get_live_data(symbol):
         return df.iloc[-1]
     except: return None
 
-# [추가] 빈칸을 계산해서 채워주는 핵심 함수
 def sync_portfolio(df):
     for index, row in df.iterrows():
-        # entry_atr이 없으면 과거 데이터를 뒤져서 계산
         if pd.isna(row.get('entry_atr')) or row.get('entry_atr') == 0:
             try:
                 start_search = (datetime.strptime(row['entry_date'], '%Y-%m-%d') - timedelta(days=40)).strftime('%Y-%m-%d')
@@ -49,7 +47,6 @@ def sync_portfolio(df):
                 df.at[index, 'entry_atr'] = tr.rolling(14).mean().iloc[-1]
             except: pass
         
-        # max_profit 업데이트
         try:
             curr_price = fdr.DataReader(row['code']).iloc[-1]['Close']
             curr_profit = (curr_price / row['entry_price']) - 1
@@ -59,15 +56,26 @@ def sync_portfolio(df):
 
 def run_bot():
     if not os.path.exists(PORTFOLIO_FILE): return
+    
+    # [업그레이드] KRX 목록 가져오기 및 '안전' 필터링
     krx = fdr.StockListing('KRX')
-    name_map = dict(zip(krx['Code'], krx['Name']))
+    
+    # 투자경고, 투자위험, 관리종목, 거래정지 등 위험 종목 제외 로직
+    # FinanceDataReader의 'State' 컬럼을 활용합니다.
+    forbidden_states = ['투자경고', '투자위험', '관리종목', '거래정지', '단기과열']
+    if 'State' in krx.columns:
+        safe_krx = krx[~krx['State'].isin(forbidden_states)].copy()
+    else:
+        # 컬럼명이 다른 경우를 대비한 유연한 필터링
+        safe_krx = krx.copy()
+    
+    name_map = dict(zip(safe_krx['Code'], safe_krx['Name']))
     
     all_data = pd.read_csv(PORTFOLIO_FILE, dtype={'code': str})
     cash_mask = all_data['code'].str.upper() == 'CASH'
     cash_row = all_data[cash_mask]
     portfolio = all_data[~cash_mask].copy()
 
-    # [수정] 데이터 동기화 실행 (ATR 계산 등)
     portfolio = sync_portfolio(portfolio)
     current_cash = cash_row['qty'].iloc[0] if not cash_row.empty else 0
 
@@ -75,7 +83,7 @@ def run_bot():
     market_alive = kospi['Close'].iloc[-1] > kospi['Close'].rolling(20).mean().iloc[-1]
     idx_ret = (kospi['Close'].iloc[-1] / kospi['Close'].iloc[-21]) - 1
     
-    report = f"🌿 *Smart Picking v8.3 리포트*\n\n"
+    report = f"🛡️ *Smart Picking v8.3 (Safe Mode)*\n\n"
     report += f"1) 시장 지수 : {'✅ 매수 가능' if market_alive else '⚠️ 관망'}\n"
     report += f"- 지수 모멘텀: {idx_ret:.2%} | 현금: {current_cash:,.0f}원\n\n"
 
@@ -87,7 +95,6 @@ def run_bot():
             p_name = name_map.get(row['code'], row['code'])
             profit = (curr['Close'] / row['entry_price']) - 1
             
-            # [수정] ATR 데이터 기반 손절가 계산
             atr_val = row['entry_atr'] if not pd.isna(row['entry_atr']) else 0
             stop = row['entry_price'] - (ATR_MULTIPLIER * atr_val)
             if row['max_profit'] >= 0.03: stop = max(stop, row['entry_price'])
@@ -101,12 +108,13 @@ def run_bot():
             report += f"- 제안: *{signal}* (손절가: {stop:,.0f})\n"
             report += f"----------------------------\n"
 
-    report += f"\n3) 신규 종목 추천 (남은 슬롯 채우기)\n━━━━━━━━━━━━\n"
+    report += f"\n3) 안전 종목 추천 (경고 종목 제외)\n━━━━━━━━━━━━\n"
     empty_slots = MAX_POSITIONS - len(portfolio)
     if not market_alive or empty_slots <= 0:
         report += "- 신규 매수 조건 미충족\n"
     else:
-        top_codes = krx.nlargest(250, 'Marcap')['Code'].tolist()
+        # 안전한 종목 중 시총 상위 250개 추출
+        top_codes = safe_krx.nlargest(250, 'Marcap')['Code'].tolist()
         candidates = []
         with ThreadPoolExecutor(max_workers=20) as ex:
             results = list(ex.map(get_live_data, top_codes))
@@ -120,7 +128,6 @@ def run_bot():
         for cand in candidates[:5]:
             report += f"✅ *{name_map.get(cand['code'])}*\n- 모멘텀: {cand['mom']:.2%} | *매수금: {buy_unit:,.0f}원*\n"
 
-    # [핵심] 수정한 데이터를 다시 CSV에 저장
     final_df = pd.concat([portfolio, cash_row])
     final_df.to_csv(PORTFOLIO_FILE, index=False)
     
