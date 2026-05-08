@@ -132,7 +132,7 @@ def generate_report(portfolio_with_data, candidates, market_status, cash, idx_re
             sell_reason = ""
             if profit >= TARGET_PROFIT: sell_reason = "TARGET"
             elif live['Close'] < stop_price: sell_reason = "STOP"
-            elif hold_days >= (TIME_CUT_DAYS): sell_reason = "TIME-CUT"
+            elif hold_days >= (TIME_CUT_DAYS * 1.4): sell_reason = "TIME-CUT"
             
             signal = f"SELL ({sell_reason})" if sell_reason else "HOLD"
             report += f"   └ 대응: `{signal}`\n   ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n"
