@@ -13,7 +13,7 @@ PORTFOLIO_FILE = 'my_portfolio.csv'
 
 # 매매 기준 (백테스트 승리 공식: ATR 손절 & 40일 타임컷)
 MAX_POSITIONS = 5
-TARGET_PROFIT = 0.10
+TARGET_PROFIT = 0.05
 ATR_MULTIPLIER = 2.0
 TIME_CUT_DAYS = 40         # 약 2달 (영업일 40일)
 RSI_OVERHEAT = 75
