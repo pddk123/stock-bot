@@ -1,9 +1,7 @@
 name: Daily Stock Analysis
 
 on:
-  schedule:
-    # 월~금 한국시간 오전 9시 49분 실행 (UTC 00:49)
-    - cron: '49 00 * * 1-5'
+
   workflow_dispatch: # 수동 실행 버튼 활성화
 
 jobs:
